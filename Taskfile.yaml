@@ -1,0 +1,34 @@
+version: "3"
+
+vars:
+  APP_NAME: grid
+
+tasks:
+  install-deps:
+    cmds:
+    - go mod tidy
+
+  default:
+    desc: "Build grid"
+    deps: [install-deps]
+    cmds:
+    - go build -o bin/{{.APP_NAME}}-api ./cmd/api/main.go
+    - go build -o bin/{{.APP_NAME}}-controller ./cmd/controller/main.go
+    - go build -o bin/{{.APP_NAME}}-worker ./cmd/worker/main.go
+    - go build -o bin/{{.APP_NAME}} ./cmd/client/main.go
+    sources:
+    - "**/**/*.go"
+    generates:
+    - "bin/*"
+
+  test:
+    deps:
+    - install-deps
+    desc: "Run tests"
+    cmds:
+    - go test -v ./... -cover
+
+  clean:
+    desc: "Clean up"
+    cmds:
+    - rm -f bin/*
