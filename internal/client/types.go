@@ -26,3 +26,10 @@ type Request struct {
 	Payload   map[string]any `json:"payload"`
 	Timestamp time.Time      `json:"timestamp"`
 }
+
+type Job struct {
+	ID        string         `json:"id"`
+	Action    string         `json:"action"`
+	Payload   map[string]any `json:"payload"`
+	Timestamp time.Time      `json:"timestamp"`
+}

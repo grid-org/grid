@@ -79,7 +79,13 @@ func getStatus(ectx echo.Context) error {
 func getJob(ectx echo.Context) error {
 	c := ectx.Get("client").(*client.Client)
 	id := ectx.QueryParam("id")
-	return ectx.JSON(http.StatusOK, c.GetJob(id))
+
+	job, err := c.GetJob(id)
+	if err != nil {
+		return ectx.JSON(http.StatusNotFound, err)
+	}
+
+	return ectx.JSON(http.StatusOK, job)
 }
 
 func postJob(ectx echo.Context) error {

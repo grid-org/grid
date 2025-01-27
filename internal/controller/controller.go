@@ -32,7 +32,6 @@ func Run(cfg *config.Config, c *client.Client) error {
 
 		return fmt.Errorf("Error ensuring stream: %w", err)
 	}
-	cancel()
 
 	log.Info("Ensuring job stream")
 	_, err = c.JS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
@@ -116,7 +115,9 @@ func handleRequest(c *client.Client, msg jetstream.Msg) {
 		"timestamp", req.Timestamp.Format(time.RFC3339),
 	)
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	// Push to job stream
 	jobSubject := fmt.Sprintf("job.all.%s", req.Action)
 	jobMsg := &nats.Msg{

@@ -1,8 +1,5 @@
 version: "3"
 
-vars:
-  APP_NAME: grid
-
 tasks:
   install-deps:
     cmds:
@@ -12,14 +9,17 @@ tasks:
     desc: "Build grid"
     deps: [install-deps]
     cmds:
-    - go build -o bin/{{.APP_NAME}}-api ./cmd/api/main.go
-    - go build -o bin/{{.APP_NAME}}-controller ./cmd/controller/main.go
-    - go build -o bin/{{.APP_NAME}}-worker ./cmd/worker/main.go
-    - go build -o bin/{{.APP_NAME}} ./cmd/client/main.go
+    - go build -o bin/api ./cmd/api/main.go
+    - go build -o bin/controller ./cmd/controller/main.go
+    - go build -o bin/worker ./cmd/worker/main.go
+    - go build -o bin/grid ./cmd/client/main.go
     sources:
     - "**/**/*.go"
     generates:
-    - "bin/*"
+    - bin/api
+    - bin/controller
+    - bin/worker
+    - bin/grid
 
   test:
     deps:
