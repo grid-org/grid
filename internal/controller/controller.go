@@ -55,7 +55,6 @@ func Run(cfg *config.Config, c *client.Client) error {
 		DeliverPolicy:  jetstream.DeliverAllPolicy,
 		AckPolicy:      jetstream.AckExplicitPolicy,
 		MaxAckPending:  1,
-		AckWait:        5 * time.Second, // Quick retry since job stream is serialized
 	})
 	if err != nil {
 		return fmt.Errorf("Error creating consumer: %w", err)
@@ -126,14 +125,18 @@ func handleRequest(c *client.Client, msg jetstream.Msg) {
 		Header:  msg.Headers(),
 	}
 	if _, err := c.JS.PublishMsg(ctx, jobMsg); err != nil {
-		// Will retry after AckWait
-		msg.InProgress()
-	} else {
-		// Acknowledge
-		if err := msg.Ack(); err != nil {
-			log.Error("Error acknowledging request", "error", err)
-		} else {
-			log.Info("Acknowledged request", "id", req.ID, "action", req.Action)
-		}
-	}
+        // Will retry after a delay
+        if err := msg.NakWithDelay(time.Second * 5); err != nil {
+            log.Error("Error nacking request with delay", "error", err)
+        } else {
+            log.Info("Nacked request with delay", "id", req.ID, "action", req.Action)
+        }
+    } else {
+        // Acknowledge
+        if err := msg.Ack(); err != nil {
+            log.Error("Error acknowledging request", "error", err)
+        } else {
+            log.Info("Acknowledged request", "id", req.ID, "action", req.Action)
+        }
+    }
 }

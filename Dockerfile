@@ -1,28 +1,41 @@
 FROM golang:1.23 AS builder
 WORKDIR /workspace
 
-# Copy everything and build the app
+# Copy go.mod and go.sum and download dependencies
 COPY go.mod go.sum ./
 RUN go mod download
+
+# Copy the source code
 COPY . .
 
-# Build binaries for each component
+# Build API binary
+FROM builder AS build-api
 RUN go build -o bin/api ./cmd/api
+
+# Build Controller binary
+FROM builder AS build-controller
 RUN go build -o bin/controller ./cmd/controller
+
+# Build Worker binary
+FROM builder AS build-worker
 RUN go build -o bin/worker ./cmd/worker
 
 # Stage 2: Production images
-FROM ubuntu:22.04 AS api
+FROM ubuntu:22.04 AS base
 WORKDIR /app
-COPY --from=builder /workspace/bin/api ./api
+RUN apt-get update && apt-get install -y ca-certificates
+
+# API image
+FROM base AS api
+COPY --from=build-api /workspace/bin/api ./api
 ENTRYPOINT ["./api"]
 
-FROM ubuntu:22.04 AS controller
-WORKDIR /app
-COPY --from=builder /workspace/bin/controller ./controller
+# Controller image
+FROM base AS controller
+COPY --from=build-controller /workspace/bin/controller ./controller
 ENTRYPOINT ["./controller"]
 
-FROM ubuntu:22.04 AS worker
-WORKDIR /app
-COPY --from=builder /workspace/bin/worker ./worker
+# Worker image
+FROM base AS worker
+COPY --from=build-worker /workspace/bin/worker ./worker
 ENTRYPOINT ["./worker"]

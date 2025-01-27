@@ -12,12 +12,15 @@ import (
 	"github.com/grid-org/grid/internal/config"
 )
 
-// func New(cfg *config.Config, clientOpts ...nats.Option) (*Client, error) {
 func New(cfg *config.Config) (*Client, error) {
-	nc, err := nats.Connect(cfg.NATS.URL, []nats.Option{
+	ncOpts := []nats.Option{
 		nats.RetryOnFailedConnect(true),
-	}...,
-	)
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2 * time.Second),
+		nats.Name(cfg.NATS.Name),
+	}
+
+	nc, err := nats.Connect(cfg.NATS.URL, ncOpts...)
 	if err != nil {
 		return nil, err
 	}
