@@ -6,11 +6,11 @@ type APIConfig struct {
 }
 
 type NATSConfig struct {
-	URLS  []string `yaml:"url"`
-	Name string `yaml:"name"`
+	URLS []string `yaml:"urls"`
+	Name string   `yaml:"name"`
 }
 
 type Config struct {
-	API        APIConfig        `yaml:"api"`
-	NATS       NATSConfig       `yaml:"nats"`
+	API  APIConfig  `yaml:"api"`
+	NATS NATSConfig `yaml:"nats"`
 }

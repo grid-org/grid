@@ -32,6 +32,12 @@ func main() {
 
 func setup(c *cli.Context) error {
 	cfg = config.LoadConfig(c.String("config"))
+
+	urls := c.String("urls")
+	if urls != "" {
+		cfg.NATS.URLS = []string{urls}
+	}
+
 	var err error
 	gc, err = client.New(cfg)
 	if err != nil {

@@ -23,19 +23,20 @@ RUN go build -o bin/worker ./cmd/worker
 # Stage 2: Production images
 FROM ubuntu:22.04 AS base
 WORKDIR /app
-RUN apt-get update && apt-get install -y ca-certificates
+# RUN apk add --no-cache ca-certificates
+# RUN apt-get update && apt-get install -y ca-certificates
 
 # API image
 FROM base AS api
-COPY --from=build-api /workspace/bin/api ./api
-ENTRYPOINT ["./api"]
+COPY --from=build-api /workspace/bin/api /app/api
+ENTRYPOINT ["/app/api"]
 
 # Controller image
 FROM base AS controller
-COPY --from=build-controller /workspace/bin/controller ./controller
-ENTRYPOINT ["./controller"]
+COPY --from=build-controller /workspace/bin/controller /app/controller
+ENTRYPOINT ["/app/controller"]
 
 # Worker image
 FROM base AS worker
-COPY --from=build-worker /workspace/bin/worker ./worker
-ENTRYPOINT ["./worker"]
+COPY --from=build-worker /workspace/bin/worker /app/worker
+ENTRYPOINT ["/app/worker"]

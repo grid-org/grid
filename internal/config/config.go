@@ -8,15 +8,16 @@ import (
 )
 
 func LoadConfig(configFile string) *Config {
+	cfg := Defaults()
+
 	data, err := os.ReadFile(configFile)
 	if err != nil {
-		log.Errorf("Error reading config file: %v; loading defaults", err)
-		return Defaults()
+		log.Warn("Error reading config file: %v; loading defaults", "error", err)
+		return cfg
 	}
 
-	cfg := Defaults()
 	if err := yaml.Unmarshal(data, cfg); err != nil {
-		log.Errorf("Error parsing config file: %v; loading defaults", err)
+		log.Warn("Error parsing config file: %v; loading defaults", "error", err)
 		return cfg
 	}
 
@@ -39,7 +40,7 @@ func Defaults() *Config {
 			Port: 8765,
 		},
 		NATS: NATSConfig{
-			URLS:  []string{"nats://localhost:4222"},
+			URLS: []string{"nats://localhost:4222"},
 			Name: getHostname(),
 		},
 	}

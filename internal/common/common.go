@@ -19,11 +19,10 @@ func AppFlags() []cli.Flag {
 			EnvVars: []string{"GRID_CONFIG"},
 		},
 		&cli.StringFlag{
-			Name: "url",
+			Name:    "url",
 			Aliases: []string{"u"},
-			Usage: "NATS server URL",
-			Value: "nats://localhost:4222",
-			EnvVars: []string{"GRID_URL"},
+			Usage:   "NATS server URL",
+			EnvVars: []string{"NATS_URL"},
 		},
 	}
 }
