@@ -2,30 +2,6 @@
 
 **GRID** (**Grid of Remote Infrastructure Daemons**) is a NATS-based job execution system designed for the seamless orchestration and management of jobs across a cluster of machines. By leveraging host agents and utilizing NATS as a message bus, GRID ensures efficient communication, robust scalability, and reliable job execution suitable for various distributed systems.
 
-- [Grid of Remote Infrastructure Daemons](#grid-of-remote-infrastructure-daemons)
-  - [Features](#features)
-  - [Architecture](#architecture)
-    - [Components](#components)
-      - [API Server](#api-server)
-      - [Controller Agents](#controller-agents)
-      - [Worker Agents](#worker-agents)
-    - [Workflow](#workflow)
-  - [Stream Configuration](#stream-configuration)
-    - [Request Stream](#request-stream)
-    - [Job Stream](#job-stream)
-    - [Worker Consumers](#worker-consumers)
-    - [Controller Agents Stream Handling](#controller-agents-stream-handling)
-  - [NATS KV Store](#nats-kv-store)
-    - [Status Tracking](#status-tracking)
-    - [Distributed Locking](#distributed-locking)
-  - [NATS Object Store](#nats-object-store)
-    - [Configuration Management](#configuration-management)
-  - [Functionality](#functionality)
-  - [Examples](#examples)
-    - [Example 1: Executing a Backup Job Across All Nodes](#example-1-executing-a-backup-job-across-all-nodes)
-    - [Example 2: Checking Job Status](#example-2-checking-job-status)
-  - [License](#license)
-
 ## Features
 
 - **Scalable Job Execution:** Efficiently manage and execute jobs across numerous nodes.
