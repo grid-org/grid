@@ -2,121 +2,88 @@ package main
 
 import (
 	"encoding/json"
-	"os"
 
+	"github.com/alecthomas/kong"
 	"github.com/charmbracelet/log"
-	"github.com/urfave/cli/v2"
-
+	"github.com/grid-org/grid/internal/cli"
 	"github.com/grid-org/grid/internal/client"
-	"github.com/grid-org/grid/internal/common"
-	"github.com/grid-org/grid/internal/config"
 )
 
-var (
-	cfg *config.Config
-	gc  *client.Client
-)
+type ClientCLI struct {
+	CLI    *cli.CLI `embed:""`
+	Job    JobCmd   `cmd:"" help:"Job management"`
+	Status StatusCmd `cmd:"" help:"Get cluster status"`
+}
+
+type JobCmd struct {
+	New  NewJobCmd  `cmd:"" help:"Create a new job"`
+	List ListJobCmd `cmd:"" help:"List all jobs"`
+	Get  GetJobCmd  `cmd:"" help:"Get a job"`
+}
+
+type NewJobCmd struct {
+	Action  string `arg:"" help:"Action to perform"`
+	Payload string `arg:"" help:"Payload to send"`
+}
+
+type ListJobCmd struct{}
+
+type GetJobCmd struct {
+	ID string `arg:"" help:"ID of the job to get"`
+}
+
+type StatusCmd struct{}
 
 func main() {
-	app := &cli.App{
-		Name:   "grid",
-		Usage:  "GRID client",
-		Flags:  common.AppFlags(),
-		Before: setup,
-		Commands: []*cli.Command{
-			{
-				Name:  "status",
-				Usage: "Cluster status",
-				Action: getStatus,
-			},
-			{
-				Name:  "job",
-				Usage: "Create a new job",
-				Subcommands: []*cli.Command{
-					{
-						Name:  "new",
-						Usage: "Create a new job",
-						Flags: []cli.Flag{
-							&cli.StringFlag{
-								Name:  "action",
-								Usage: "Action to perform",
-							},
-							&cli.StringFlag{
-								Name:  "payload",
-								Usage: "Payload to send",
-							},
-						},
-						Action: newJob,
-					},
-					{
-						Name:  "list",
-						Usage: "List all jobs",
-						Action: listJobs,
-					},
-					{
-						Name:  "get",
-						Usage: "Get a job",
-						Args: true,
-						Action: getJob,
-					},
-				},
-			},
-		},
-	}
-
-	if err := app.Run(os.Args); err != nil {
-		log.Fatalf("Error running GRID: %v", err)
-	}
+	app := &ClientCLI{}
+	appCtx := &cli.Context{}
+	ctx := kong.Parse(app,
+		kong.ConfigureHelp(kong.HelpOptions{
+			Compact: true,
+			FlagsLast: true,
+			Summary: true,
+		}),
+		kong.Bind(appCtx),
+	)
+	ctx.FatalIfErrorf(ctx.Run())
 }
 
-func setup(c *cli.Context) error {
-	cfg = config.LoadConfig(c.String("config"))
-	var err error
-	gc, err = client.New(cfg)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func getStatus(c *cli.Context) error {
-	status, err := gc.GetClusterStatus()
-	if err != nil {
-		return err
-	}
-	log.Infof("Cluster status: %+v", status)
-	return nil
-}
-
-func newJob(c *cli.Context) error {
+func (n *NewJobCmd) Run(ctx *cli.Context) error {
 	var req client.Request
-	if err := json.Unmarshal([]byte(c.String("payload")), &req.Payload); err != nil {
+	if err := json.Unmarshal([]byte(n.Payload), &req.Payload); err != nil {
 		return err
 	}
 
-	req.Action = c.String("action")
-	return gc.NewJob(req)
+	req.Action = n.Action
+	return ctx.Client.NewJob(req)
 }
 
-func listJobs(c *cli.Context) error {
-	jobs, err := gc.ListJobs()
+func (l *ListJobCmd) Run(ctx *cli.Context) error {
+	jobs, err := ctx.Client.ListJobs()
 	if err != nil {
 		return err
 	}
 
-	log.Infof("Jobs:")
-	for _, entry := range jobs {
-		log.Infof("%+v", entry)
+	for _, job := range jobs {
+		log.Infof("Job %s: %s", job.ID, job.Action)
 	}
-
 	return nil
 }
 
-func getJob(c *cli.Context) error {
-	job, err := gc.GetJob(c.Args().First())
+func (g *GetJobCmd) Run(ctx *cli.Context) error {
+	job, err := ctx.Client.GetJob(g.ID)
 	if err != nil {
 		return err
 	}
-	log.Infof("Job: %+v", job)
+	log.Infof("Job %s: %s", job.ID, job.Action)
+	return nil
+}
+
+func (s *StatusCmd) Run(ctx *cli.Context) error {
+	status, err := ctx.Client.GetClusterStatus()
+	if err != nil {
+		return err
+	}
+	log.Info(string(status.Value()))
 	return nil
 }

@@ -1,51 +1,36 @@
 package main
 
 import (
-	"os"
-
-	"github.com/charmbracelet/log"
-	"github.com/grid-org/grid/internal/client"
+	"github.com/alecthomas/kong"
+	"github.com/grid-org/grid/internal/cli"
 	"github.com/grid-org/grid/internal/common"
-	"github.com/grid-org/grid/internal/config"
 	"github.com/grid-org/grid/internal/controller"
-	"github.com/urfave/cli/v2"
 )
 
-var (
-	cfg *config.Config
-	gc  *client.Client
-)
+type ControllerCLI struct {
+	CLI *cli.CLI `embed:""`
+}
 
 func main() {
-	app := &cli.App{
-		Name:    "controller",
-		Usage:   "Run the Grid Controller",
-		Flags: common.AppFlags(),
-		Before: setup,
-		Action: run,
-	}
-
-	if err := app.Run(os.Args); err != nil {
-		log.Fatalf("Error running Controller: %v", err)
-	}
+	app := &ControllerCLI{}
+	appCtx := &cli.Context{}
+	ctx := kong.Parse(app,
+		kong.ConfigureHelp(kong.HelpOptions{
+			Compact: true,
+			FlagsLast: true,
+			Summary: true,
+		}),
+		kong.Bind(appCtx),
+	)
+	ctx.FatalIfErrorf(ctx.Run())
 }
 
-func setup(c *cli.Context) error {
-	cfg = config.LoadConfig(c.String("config"))
-
-	urls := c.String("urls")
-	if urls != "" {
-		cfg.NATS.URLS = []string{urls}
-	}
-
-	var err error
-	gc, err = client.New(cfg)
-	if err != nil {
+func (*ControllerCLI) Run(ctx *cli.Context) error {
+	c := controller.New(ctx.Config, ctx.Client)
+	if err := c.Start(); err != nil {
 		return err
 	}
-	return nil
-}
 
-func run(c *cli.Context) error {
-	return controller.Run(cfg, gc)
+	common.WaitForSignal()
+	return nil
 }

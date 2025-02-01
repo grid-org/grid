@@ -1,15 +1,10 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net"
 	"net/http"
-	"os"
-	"os/signal"
 	"strconv"
-	"syscall"
-	"time"
 
 	"github.com/grid-org/grid/internal/client"
 	"github.com/grid-org/grid/internal/config"
@@ -18,7 +13,22 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-func Run(cfg *config.Config, c *client.Client) error {
+// Easy JSON type
+type J map[string]any
+
+type API struct {
+	config *config.Config
+	client *client.Client
+}
+
+func New(cfg *config.Config, c *client.Client) *API {
+	return &API{
+		config: cfg,
+		client: c,
+	}
+}
+
+func (a *API) Start() (*echo.Echo, error) {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
@@ -27,23 +37,23 @@ func Run(cfg *config.Config, c *client.Client) error {
 	e.Use(echoLogger())
 
 	// Add client to handler context
-	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(ectx echo.Context) error {
-			ectx.Set("client", c)
-			return next(ectx)
-		}
-	})
+	// e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+	// 	return func(ectx echo.Context) error {
+	// 		ectx.Set("client", c)
+	// 		return next(ectx)
+	// 	}
+	// })
 
 	// Public routes
-	e.GET("/status", getStatus)
-	e.GET("/job", getJob)
-	e.POST("/job", postJob)
+	e.GET("/status", a.getStatus)
+	e.GET("/job", a.getJob)
+	e.POST("/job", a.postJob)
 
 	// Secure routes
 	secure := e.Group("/api")
 	secure.Use(tokenAuth())
 
-	addr := net.JoinHostPort(cfg.API.Host, strconv.Itoa(cfg.API.Port))
+	addr := net.JoinHostPort(a.config.API.Host, strconv.Itoa(a.config.API.Port))
 
 	// Start server in the background
 	go func() {
@@ -53,45 +63,31 @@ func Run(cfg *config.Config, c *client.Client) error {
 	}()
 	log.Info("API server started", "address", addr)
 
-	// Wait for signal
-	sigch := make(chan os.Signal, 1)
-	signal.Notify(sigch, os.Interrupt, syscall.SIGTERM)
-	<-sigch
-
-	// Shutdown context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Shutdown server
-	log.Info("Shutting down API server")
-	if err := e.Shutdown(ctx); err != nil {
-		return err
-	}
-
-	return nil
+	return e, nil
 }
 
-func getStatus(ectx echo.Context) error {
-	c := ectx.Get("client").(*client.Client)
-	return ectx.JSON(http.StatusOK, c.GetStatus())
-}
-
-func getJob(ectx echo.Context) error {
-	c := ectx.Get("client").(*client.Client)
-	id := ectx.QueryParam("id")
-
-	job, err := c.GetJob(id)
+func (a *API) getStatus(ctx echo.Context) error {
+	status, err := a.client.GetClusterStatus()
 	if err != nil {
-		return ectx.JSON(http.StatusNotFound, err)
+		return ctx.JSON(http.StatusInternalServerError, err)
 	}
-
-	return ectx.JSON(http.StatusOK, job)
+	return ctx.JSON(http.StatusOK, status)
 }
 
-func postJob(ectx echo.Context) error {
-	c := ectx.Get("client").(*client.Client)
-	action := ectx.Param("action")
-	payload := ectx.Param("payload")
+func (a *API) getJob(ctx echo.Context) error {
+	id := ctx.QueryParam("id")
+
+	job, err := a.client.GetJob(id)
+	if err != nil {
+		return ctx.JSON(http.StatusNotFound, err)
+	}
+
+	return ctx.JSON(http.StatusOK, job)
+}
+
+func (a *API) postJob(ctx echo.Context) error {
+	action := ctx.Param("action")
+	payload := ctx.Param("payload")
 
 	req := client.Request{
 		Action: action,
@@ -100,5 +96,5 @@ func postJob(ectx echo.Context) error {
 	if err := json.Unmarshal([]byte(payload), &req.Payload); err != nil {
 		return err
 	}
-	return ectx.JSON(http.StatusAccepted, c.NewJob(req))
+	return ctx.JSON(http.StatusAccepted, a.client.NewJob(req))
 }

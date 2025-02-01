@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"time"
 
@@ -12,6 +11,25 @@ import (
 
 	"github.com/grid-org/grid/internal/config"
 )
+
+type Client struct {
+	nc *nats.Conn
+	js jetstream.JetStream
+}
+
+type Status struct {
+	Connected  bool            `json:"connected"`
+	URL        string          `json:"url"`
+	Address    string          `json:"address"`
+	Statistics nats.Statistics `json:"statistics"`
+}
+
+type Request struct {
+	ID        uint64         `json:"id"`
+	Action    string         `json:"action"`
+	Payload   map[string]any `json:"payload"`
+	Timestamp time.Time      `json:"timestamp"`
+}
 
 func New(cfg *config.Config) (*Client, error) {
 	ncOpts := []nats.Option{
@@ -41,104 +59,80 @@ func New(cfg *config.Config) (*Client, error) {
 	}
 
 	return &Client{
-		NC: nc,
-		JS: js,
+		nc: nc,
+		js: js,
 	}, nil
 }
 
-func (c *Client) GetStatus() Status {
+func (c *Client) GetClientStatus() Status {
 	return Status{
-		Connected:  c.NC.IsConnected(),
-		URL:        c.NC.ConnectedUrl(),
-		Address:    c.NC.ConnectedAddr(),
-		Statistics: c.NC.Stats(),
+		Connected:  c.nc.IsConnected(),
+		URL:        c.nc.ConnectedUrl(),
+		Address:    c.nc.ConnectedAddr(),
+		Statistics: c.nc.Stats(),
 	}
 }
 
 func (c *Client) Close() {
-	c.NC.Close()
+	c.nc.Close()
 }
 
-func (c *Client) NewJob(req Request) error {
+func (c *Client) EnsureStream(jscfg jetstream.StreamConfig) (jetstream.Stream, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	data, err := json.Marshal(req.Payload)
+	stream, err := c.js.CreateOrUpdateStream(ctx, jscfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	c.JS.PublishMsg(ctx, &nats.Msg{
-		Subject: "request.job",
-		Header: nats.Header{
-			"action": []string{req.Action},
-		},
-		Data: data,
-	})
-	return nil
+	return stream, nil
 }
 
-func (c *Client) GetJob(id string) (Job, error) {
+func (c *Client) GetStream(name string) (jetstream.Stream, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	bucket, err := c.JS.KeyValue(ctx, "jobs")
+	stream, err := c.js.Stream(ctx, name)
 	if err != nil {
-		return Job{}, err
+		return nil, err
 	}
 
-	job, err := bucket.Get(ctx, id)
-	if err != nil {
-		return Job{}, err
-	}
-
-	var j Job
-	if err := json.Unmarshal(job.Value(), &j); err != nil {
-		return Job{}, err
-	}
-
-	return j, nil
+	return stream, nil
 }
 
-func (c *Client) ListJobs() ([]Job, error) {
+func (c *Client) EnsureConsumer(stream jetstream.Stream, cfg jetstream.ConsumerConfig) (jetstream.Consumer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	bucket, err := c.JS.KeyValue(ctx, "jobs")
+	consumer, err := stream.CreateOrUpdateConsumer(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	var jobs []Job
-	lister, err := bucket.ListKeys(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	for entry := range lister.Keys() {
-		var j Job
-		if err := json.Unmarshal([]byte(entry), &j); err != nil {
-			return nil, err
-		}
-		jobs = append(jobs, j)
-	}
-
-	return jobs, nil
+	return consumer, nil
 }
 
-func (c *Client) GetClusterStatus() (jetstream.KeyValueEntry, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func (c *Client) EnsureKV(cfg jetstream.KeyValueConfig) (jetstream.KeyValue, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	bucket, err := c.JS.KeyValue(ctx, "cluster")
+	bucket, err := c.js.CreateKeyValue(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	status, err := bucket.Get(ctx, "status")
+	return bucket, nil
+}
+
+func (c *Client) Publish(msg *nats.Msg) (*jetstream.PubAck, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ack, err := c.js.PublishMsg(ctx, msg)
 	if err != nil {
 		return nil, err
 	}
 
-	return status, nil
+	return ack, nil
 }

@@ -15,13 +15,25 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-func Run(cfg *config.Config, c *client.Client) error {
+type Controller struct {
+	config *config.Config
+	client *client.Client
+}
+
+func New(cfg *config.Config, c *client.Client) *Controller {
+	return &Controller{
+		config: cfg,
+		client: c,
+	}
+}
+
+func (c *Controller) Start() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	// Ensure streams
 	log.Info("Ensuring requests stream")
-	requests, err := c.JS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+	requests, err := c.client.EnsureStream(jetstream.StreamConfig{
 		Name:      "requests",
 		Subjects:  []string{"request.>"},
 		Retention: jetstream.WorkQueuePolicy, // Only deliver to one controller
@@ -29,12 +41,11 @@ func Run(cfg *config.Config, c *client.Client) error {
 		Replicas:  1,
 	})
 	if err != nil {
-
 		return fmt.Errorf("Error ensuring stream: %w", err)
 	}
 
 	log.Info("Ensuring job stream")
-	_, err = c.JS.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+	_, err = c.client.EnsureStream(jetstream.StreamConfig{
 		Name:      "jobs",
 		Subjects:  []string{"job.*.>"},
 		Retention: jetstream.InterestPolicy, // Remove acknowledged messages
@@ -48,7 +59,7 @@ func Run(cfg *config.Config, c *client.Client) error {
 
 	// Create consumer
 	log.Info("Creating consumer")
-	cons, err := requests.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+	cons, err := c.client.EnsureConsumer(requests, jetstream.ConsumerConfig{
 		Durable:        "controller",
 		FilterSubjects: []string{"request.>"},
 		DeliverPolicy:  jetstream.DeliverAllPolicy,
@@ -59,9 +70,9 @@ func Run(cfg *config.Config, c *client.Client) error {
 		return fmt.Errorf("Error creating consumer: %w", err)
 	}
 
-	// Create key-value bucket
+	// Create cluster bucket
 	log.Info("Creating key-value bucket")
-	bucket, err := c.JS.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+	bucket, err := c.client.EnsureKV(jetstream.KeyValueConfig{
 		Bucket: "cluster",
 	})
 	if err != nil {
@@ -75,11 +86,18 @@ func Run(cfg *config.Config, c *client.Client) error {
 		return fmt.Errorf("Error storing cluster status: %w", err)
 	}
 
+	// Create jobs bucket
+	log.Info("Ensuring jobs bucket")
+	_, err = c.client.EnsureKV(jetstream.KeyValueConfig{
+		Bucket: "jobs",
+	})
+	if err != nil {
+		return fmt.Errorf("Error ensuring jobs bucket: %w", err)
+	}
+
 	// Start consuming
 	log.Info("Consuming requests")
-	_, err = cons.Consume(func(msg jetstream.Msg) {
-		handleRequest(c, msg)
-	})
+	_, err = cons.Consume(c.handleRequest)
 	if err != nil {
 		return fmt.Errorf("Error consuming: %w", err)
 	}
@@ -89,7 +107,7 @@ func Run(cfg *config.Config, c *client.Client) error {
 	return nil
 }
 
-func handleRequest(c *client.Client, msg jetstream.Msg) {
+func (c *Controller) handleRequest(msg jetstream.Msg) {
 	var req client.Request
 	if err := json.Unmarshal(msg.Data(), &req.Payload); err != nil {
 		log.Error("Error unmarshaling request", "error", err)
@@ -115,9 +133,6 @@ func handleRequest(c *client.Client, msg jetstream.Msg) {
 		"timestamp", req.Timestamp.Format(time.RFC3339),
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	// Push to job stream
 	jobSubject := fmt.Sprintf("job.all.%s", req.Action)
 	jobMsg := &nats.Msg{
@@ -125,19 +140,19 @@ func handleRequest(c *client.Client, msg jetstream.Msg) {
 		Data:    msg.Data(),
 		Header:  msg.Headers(),
 	}
-	if _, err := c.JS.PublishMsg(ctx, jobMsg); err != nil {
-        // Will retry after a delay
-        if err := msg.NakWithDelay(time.Second * 5); err != nil {
-            log.Error("Error nacking request with delay", "error", err)
-        } else {
-            log.Info("Nacked request with delay", "id", req.ID, "action", req.Action)
-        }
-    } else {
-        // Acknowledge
-        if err := msg.Ack(); err != nil {
-            log.Error("Error acknowledging request", "error", err)
-        } else {
-            log.Info("Acknowledged request", "id", req.ID, "action", req.Action)
-        }
-    }
+	if _, err := c.client.Publish(jobMsg); err != nil {
+		// Will retry after a delay
+		if err := msg.NakWithDelay(time.Second * 5); err != nil {
+			log.Error("Error nacking request with delay", "error", err)
+		} else {
+			log.Info("Nacked request with delay", "id", req.ID, "action", req.Action)
+		}
+	} else {
+		// Acknowledge
+		if err := msg.Ack(); err != nil {
+			log.Error("Error acknowledging request", "error", err)
+		} else {
+			log.Info("Acknowledged request", "id", req.ID, "action", req.Action)
+		}
+	}
 }

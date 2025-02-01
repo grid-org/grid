@@ -1,46 +1,48 @@
 package main
 
 import (
-	"os"
+	"context"
+	"time"
 
-	"github.com/charmbracelet/log"
-	"github.com/urfave/cli/v2"
-
+	"github.com/alecthomas/kong"
 	"github.com/grid-org/grid/internal/api"
-	"github.com/grid-org/grid/internal/client"
+	"github.com/grid-org/grid/internal/cli"
 	"github.com/grid-org/grid/internal/common"
-	"github.com/grid-org/grid/internal/config"
 )
 
-var (
-	cfg *config.Config
-	gc  *client.Client
-)
-
-func main() {
-	app := &cli.App{
-		Name:  "api",
-		Usage: "Run the Grid API server",
-		Flags: common.AppFlags(),
-		Before: setup,
-		Action: run,
-	}
-
-	if err := app.Run(os.Args); err != nil {
-		log.Fatalf("Error running API server: %v", err)
-	}
+type APICLI struct {
+	CLI *cli.CLI `embed:""`
 }
 
-func setup(c *cli.Context) error {
-	cfg = config.LoadConfig(c.String("config"))
-	var err error
-	gc, err = client.New(cfg)
+func main() {
+	app := &APICLI{}
+	appCtx := &cli.Context{}
+	ctx := kong.Parse(app,
+		kong.ConfigureHelp(kong.HelpOptions{
+			Compact:  true,
+			FlagsLast: true,
+			Summary:  true,
+		}),
+		kong.Bind(appCtx),
+	)
+	ctx.FatalIfErrorf(ctx.Run())
+}
+
+func (*APICLI) Run(ctx *cli.Context) error {
+	server := api.New(ctx.Config, ctx.Client)
+	e, err := server.Start()
 	if err != nil {
 		return err
 	}
-	return nil
-}
 
-func run(c *cli.Context) error {
-	return api.Run(cfg, gc)
+	common.WaitForSignal()
+
+	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := e.Shutdown(shutdown); err != nil {
+		return err
+	}
+
+	return nil
 }
