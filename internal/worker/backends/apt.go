@@ -13,7 +13,7 @@ func init() {
 	registerBackend("apt", &APTBackend{})
 }
 
-func (a *APTBackend) Run(req client.Request) error {
-	log.Info("Running apt backend", "payload", req.Payload)
+func (a *APTBackend) Run(job client.Job) error {
+	log.Info("Running apt backend", "action", job.Action, "payload", job.Payload)
 	return nil
 }

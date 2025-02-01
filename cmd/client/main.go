@@ -1,8 +1,6 @@
 package main
 
 import (
-	"encoding/json"
-
 	"github.com/alecthomas/kong"
 	"github.com/charmbracelet/log"
 	"github.com/grid-org/grid/internal/cli"
@@ -22,8 +20,9 @@ type JobCmd struct {
 }
 
 type NewJobCmd struct {
+	Backend string `arg:"" help:"Backend to use"`
 	Action  string `arg:"" help:"Action to perform"`
-	Payload string `arg:"" help:"Payload to send"`
+	Payload string `arg:"" help:"Payload to send" optional:""`
 }
 
 type ListJobCmd struct{}
@@ -49,13 +48,12 @@ func main() {
 }
 
 func (n *NewJobCmd) Run(ctx *cli.Context) error {
-	var req client.Request
-	if err := json.Unmarshal([]byte(n.Payload), &req.Payload); err != nil {
-		return err
+	job := client.Job{
+		Backend: n.Backend,
+		Action:  n.Action,
+		Payload: n.Payload,
 	}
-
-	req.Action = n.Action
-	return ctx.Client.NewJob(req)
+	return ctx.Client.NewJob(job)
 }
 
 func (l *ListJobCmd) Run(ctx *cli.Context) error {
@@ -65,7 +63,7 @@ func (l *ListJobCmd) Run(ctx *cli.Context) error {
 	}
 
 	for _, job := range jobs {
-		log.Infof("Job %s: %s", job.ID, job.Action)
+		log.Infof("Job %+v", job)
 	}
 	return nil
 }
@@ -75,7 +73,7 @@ func (g *GetJobCmd) Run(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	log.Infof("Job %s: %s", job.ID, job.Action)
+	log.Infof("Job %d: %s", job.ID, job.Action)
 	return nil
 }
 

@@ -13,6 +13,6 @@ func init() {
 	registerBackend("host", &HostBackend{})
 }
 
-func (h *HostBackend) Run(req client.Request) error {
+func (h *HostBackend) Run(job client.Job) error {
 	return nil
 }

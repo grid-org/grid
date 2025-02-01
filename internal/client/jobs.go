@@ -10,10 +10,15 @@ import (
 )
 
 type Job struct {
-	ID        string         `json:"id"`
-	Action    string         `json:"action"`
-	Payload   map[string]any `json:"payload"`
-	Timestamp time.Time      `json:"timestamp"`
+	ID        uint64    `json:"id"`
+	Backend   string    `json:"backend"`
+	Action    string    `json:"action"`
+	Payload   string    `json:"payload"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+func (c *Client) EncodeJob(job Job) ([]byte, error) {
+	return json.Marshal(job)
 }
 
 func (c *Client) DecodeJob(job jetstream.KeyValueEntry) (Job, error) {
@@ -25,22 +30,23 @@ func (c *Client) DecodeJob(job jetstream.KeyValueEntry) (Job, error) {
 	return j, nil
 }
 
-func (c *Client) NewJob(req Request) error {
-	data, err := json.Marshal(req.Payload)
+func (c *Client) NewJob(job Job) error {
+	job.Timestamp = time.Now().UTC()
+
+	msg := &nats.Msg{
+		Subject: "request.job",
+		Header: nats.Header{
+			"backend": []string{job.Backend},
+			"action": []string{job.Action},
+		},
+		Data: []byte(job.Payload),
+	}
+	pubAck, err := c.Publish(msg)
 	if err != nil {
 		return err
 	}
 
-	pubAck, err := c.Publish(&nats.Msg{
-		Subject: "request.job",
-		Header: nats.Header{
-			"action": []string{req.Action},
-		},
-		Data: data,
-	})
-	if err != nil {
-		return err
-	}
+	data, err := c.EncodeJob(job)
 
 	err = c.PutKV("jobs", strconv.FormatUint(pubAck.Sequence, 10), data)
 	if err != nil {

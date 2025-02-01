@@ -1,12 +1,10 @@
 package worker
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/charmbracelet/log"
 	"github.com/grid-org/grid/internal/client"
-	"github.com/grid-org/grid/internal/common"
 	"github.com/grid-org/grid/internal/config"
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -56,31 +54,28 @@ func (w *Worker) Start() error {
 	}
 
 	log.Info("Worker started")
-	common.WaitForSignal()
 	return nil
 }
 
 func (w *Worker) handleJob(msg jetstream.Msg) {
-	var req client.Request
-	if err := json.Unmarshal(msg.Data(), &req.Payload); err != nil {
-		log.Error("Error unmarshalling job", "error", err)
-		msg.TermWithReason("invalid payload")
-		return
+	job := client.Job{
+		Backend: msg.Headers().Get("backend"),
+		Action: msg.Headers().Get("action"),
+		Payload: string(msg.Data()),
 	}
 
-	req.Action = msg.Headers().Get("action")
-	log.Info("Received job", "subject", msg.Subject(), "payload", req.Payload, "action", req.Action)
+	log.Info("Received job", "subject", msg.Subject(), "backend", job.Backend, "payload", job.Payload, "action", job.Action)
 
 	// Process the job
-	if backend, ok := w.backends.Get(req.Action); ok {
-		if err := backend.Run(req); err != nil {
+	if backend, ok := w.backends.Get(job.Backend); ok {
+		if err := backend.Run(job); err != nil {
 			log.Error("Error processing job", "error", err)
 			msg.TermWithReason("processing error")
 			return
 		}
 	} else {
-		log.Error("Unknown action", "action", req.Action)
-		msg.TermWithReason("unknown action")
+		log.Error("Unknown backend", "backend", job.Backend)
+		msg.TermWithReason("unknown backend")
 		return
 	}
 

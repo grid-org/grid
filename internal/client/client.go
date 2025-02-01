@@ -24,13 +24,6 @@ type Status struct {
 	Statistics nats.Statistics `json:"statistics"`
 }
 
-type Request struct {
-	ID        uint64         `json:"id"`
-	Action    string         `json:"action"`
-	Payload   map[string]any `json:"payload"`
-	Timestamp time.Time      `json:"timestamp"`
-}
-
 func New(cfg *config.Config) (*Client, error) {
 	ncOpts := []nats.Option{
 		nats.RetryOnFailedConnect(true),

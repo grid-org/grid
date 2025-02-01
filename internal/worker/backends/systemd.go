@@ -13,6 +13,6 @@ func init() {
 	registerBackend("systemd", &SystemdBackend{})
 }
 
-func (s *SystemdBackend) Run(req client.Request) error {
+func (s *SystemdBackend) Run(job client.Job) error {
 	return nil
 }

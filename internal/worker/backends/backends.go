@@ -5,7 +5,7 @@ import "github.com/grid-org/grid/internal/client"
 var initBackends = make(map[string]Backend)
 
 type Backend interface {
-	Run(client.Request) error
+	Run(client.Job) error
 }
 
 type Backends struct {

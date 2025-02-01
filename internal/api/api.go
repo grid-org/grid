@@ -1,10 +1,10 @@
 package api
 
 import (
-	"encoding/json"
 	"net"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/grid-org/grid/internal/client"
 	"github.com/grid-org/grid/internal/config"
@@ -13,12 +13,18 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-// Easy JSON type
 type J map[string]any
 
 type API struct {
 	config *config.Config
 	client *client.Client
+}
+
+type Request struct {
+	ID        uint64    `json:"id"`
+	Action    string    `json:"action"`
+	Payload   string    `json:"payload"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 func New(cfg *config.Config, c *client.Client) *API {
@@ -35,14 +41,6 @@ func (a *API) Start() (*echo.Echo, error) {
 
 	// Middleware
 	e.Use(echoLogger())
-
-	// Add client to handler context
-	// e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
-	// 	return func(ectx echo.Context) error {
-	// 		ectx.Set("client", c)
-	// 		return next(ectx)
-	// 	}
-	// })
 
 	// Public routes
 	e.GET("/status", a.getStatus)
@@ -86,15 +84,15 @@ func (a *API) getJob(ctx echo.Context) error {
 }
 
 func (a *API) postJob(ctx echo.Context) error {
-	action := ctx.Param("action")
-	payload := ctx.Param("payload")
+	var job client.Job
+	ctx.Bind(&job)
+	// action := ctx.Param("action")
+	// payload := ctx.Param("payload")
 
-	req := client.Request{
-		Action: action,
-	}
+	// req := client.Request{
+	// 	Action:  action,
+	// 	Payload: payload,
+	// }
 
-	if err := json.Unmarshal([]byte(payload), &req.Payload); err != nil {
-		return err
-	}
-	return ctx.JSON(http.StatusAccepted, a.client.NewJob(req))
+	return ctx.JSON(http.StatusAccepted, a.client.NewJob(job))
 }
