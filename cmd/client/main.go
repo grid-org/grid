@@ -3,13 +3,14 @@ package main
 import (
 	"github.com/alecthomas/kong"
 	"github.com/charmbracelet/log"
-	"github.com/grid-org/grid/internal/cli"
 	"github.com/grid-org/grid/internal/client"
+	"github.com/grid-org/grid/internal/config"
 )
 
-type ClientCLI struct {
-	CLI    *cli.CLI `embed:""`
-	Job    JobCmd   `cmd:"" help:"Job management"`
+type CLI struct {
+	Config string    `name:"config" short:"c" help:"Path to config file" default:"./config.yaml"`
+	Debug  bool      `name:"debug" short:"d" help:"Enable debug logging"`
+	Job    JobCmd    `cmd:"" help:"Job management"`
 	Status StatusCmd `cmd:"" help:"Get cluster status"`
 }
 
@@ -34,30 +35,49 @@ type GetJobCmd struct {
 type StatusCmd struct{}
 
 func main() {
-	app := &ClientCLI{}
-	appCtx := &cli.Context{}
+	app := &CLI{}
+	appCfg := &config.Config{}
+	appClient := &client.Client{}
 	ctx := kong.Parse(app,
 		kong.ConfigureHelp(kong.HelpOptions{
-			Compact: true,
+			Compact:   true,
 			FlagsLast: true,
-			Summary: true,
+			Summary:   true,
 		}),
-		kong.Bind(appCtx),
+		kong.Bind(appCfg),
+		kong.Bind(appClient),
 	)
-	ctx.FatalIfErrorf(ctx.Run())
+	ctx.FatalIfErrorf(ctx.Run(appCfg, appClient))
 }
 
-func (n *NewJobCmd) Run(ctx *cli.Context) error {
+func (c *CLI) AfterApply(cfg *config.Config, cl *client.Client) error {
+	if c.Debug {
+		log.SetLevel(log.DebugLevel)
+	}
+
+	*cfg = *config.LoadConfig(c.Config)
+
+	var err error
+	nc, err := client.New(cfg, nil)
+	if err != nil {
+		return err
+	}
+	*cl = *nc
+
+	return nil
+}
+
+func (n *NewJobCmd) Run(cfg *config.Config, cl *client.Client) error {
 	job := client.Job{
 		Backend: n.Backend,
 		Action:  n.Action,
 		Payload: n.Payload,
 	}
-	return ctx.Client.NewJob(job)
+	return cl.NewJob(job)
 }
 
-func (l *ListJobCmd) Run(ctx *cli.Context) error {
-	jobs, err := ctx.Client.ListJobs()
+func (l *ListJobCmd) Run(cfg *config.Config, cl *client.Client) error {
+	jobs, err := cl.ListJobs()
 	if err != nil {
 		return err
 	}
@@ -68,8 +88,8 @@ func (l *ListJobCmd) Run(ctx *cli.Context) error {
 	return nil
 }
 
-func (g *GetJobCmd) Run(ctx *cli.Context) error {
-	job, err := ctx.Client.GetJob(g.ID)
+func (g *GetJobCmd) Run(cfg *config.Config, cl *client.Client) error {
+	job, err := cl.GetJob(g.ID)
 	if err != nil {
 		return err
 	}
@@ -77,8 +97,8 @@ func (g *GetJobCmd) Run(ctx *cli.Context) error {
 	return nil
 }
 
-func (s *StatusCmd) Run(ctx *cli.Context) error {
-	status, err := ctx.Client.GetClusterStatus()
+func (s *StatusCmd) Run(cfg *config.Config, cl *client.Client) error {
+	status, err := cl.GetClusterStatus()
 	if err != nil {
 		return err
 	}

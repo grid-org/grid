@@ -1,27 +1,27 @@
 services:
-  bootstrap:
-    image: nats:latest
-    ports:
-    - "4222:4222"
-    - "8222:8222"
-    configs:
-    - source: nats
-      target: /etc/nats/server.conf
-    command: ["-c", "/etc/nats/server.conf", "-n", "bootstrap"]
+  # bootstrap:
+  #   image: nats:latest
+  #   ports:
+  #   - "4222:4222"
+  #   - "8222:8222"
+  #   configs:
+  #   - source: nats
+  #     target: /etc/nats/server.conf
+  #   command: ["-c", "/etc/nats/server.conf", "-n", "bootstrap"]
 
-  nats1:
-    image: nats:latest
-    configs:
-    - source: nats
-      target: /etc/nats/server.conf
-    command: ["-c", "/etc/nats/server.conf", "-n", "nats1"]
+  # nats1:
+  #   image: nats:latest
+  #   configs:
+  #   - source: nats
+  #     target: /etc/nats/server.conf
+  #   command: ["-c", "/etc/nats/server.conf", "-n", "nats1"]
 
-  nats2:
-    image: nats:latest
-    configs:
-    - source: nats
-      target: /etc/nats/server.conf
-    command: ["-c", "/etc/nats/server.conf", "-n", "nats2"]
+  # nats2:
+  #   image: nats:latest
+  #   configs:
+  #   - source: nats
+  #     target: /etc/nats/server.conf
+  #   command: ["-c", "/etc/nats/server.conf", "-n", "nats2"]
 
   # api:
   #   build:
@@ -42,45 +42,60 @@ services:
       context: .
       dockerfile: Dockerfile
       target: controller
-    deploy:
-      replicas: 1
-    restart: always
+    command: ["-c", "/etc/grid/config.yaml"]
     configs:
     - source: grid
       target: /etc/grid/config.yaml
-    command: ["-c", "/etc/grid/config.yaml"]
+    deploy:
+      replicas: 1
+    hostname: controller
+    ports:
+    - "4222:4222"
+    - "6222:6222"
+    - "8222:8222"
+    - "8765:8765"
+    restart: always
 
-  # worker:
-  #   build:
-  #     context: .
-  #     target: worker
-  #   deploy:
-  #     replicas: 1
-  #   restart: always
-  #   configs:
-  #   - source: grid
-  #     target: /etc/grid/config.yaml
-  #   command: ["-c", "/etc/grid/config.yaml"]
+  worker:
+    build:
+      context: .
+      target: worker
+    command: ["-c", "/etc/grid/config.yaml"]
+    configs:
+    - source: grid
+      target: /etc/grid/config.yaml
+    deploy:
+      replicas: 1
+    restart: always
 
 configs:
   grid:
     content: |
       api:
+        enabled: true
         host: 0.0.0.0
         port: 8765
       nats:
-        urls: ["nats://bootstrap:4222"]
-  nats:
-    content: |
-      listen: 0.0.0.0:4222
-      monitor_port: 8222
+        client:
+          urls: ["nats://controller:4222"]
+        http:
+          enabled: true
+          host: 0.0.0.0
+          port: 8222
+        server:
+          host: 0.0.0.0
+          port: 4222
+  # nats:
+  #   content: |
+  #     listen: 0.0.0.0:4222
+  #     monitor_port: 8222
 
-      cluster {
-        name: grid
-        listen: 0.0.0.0:6222
-        routes: [
-          nats://bootstrap:6222
-        ]
-      }
+  #     cluster {
+  #       name: grid
+  #       listen: 0.0.0.0:6222
+  #       routes: [
+  #         nats://bootstrap:6222
+  #       ]
+  #     }
 
-      jetstream {}
+  #     jetstream {}

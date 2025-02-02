@@ -7,6 +7,18 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+func (c *Client) EnsureKV(cfg jetstream.KeyValueConfig) (jetstream.KeyValue, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	bucket, err := c.js.CreateKeyValue(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return bucket, nil
+}
+
 func (c *Client) GetKV(bucket, key string) (jetstream.KeyValueEntry, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

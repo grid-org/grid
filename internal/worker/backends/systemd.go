@@ -8,11 +8,10 @@ import (
 type SystemdBackend struct{}
 
 func init() {
-	log.Info("Registering systemd backend")
-	// Register the systemd backend
 	registerBackend("systemd", &SystemdBackend{})
 }
 
 func (s *SystemdBackend) Run(job client.Job) error {
+	log.Info("Running systemd backend", "action", job.Action, "payload", job.Payload)
 	return nil
 }

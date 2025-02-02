@@ -2,69 +2,104 @@ package controller
 
 import (
 	"fmt"
+	"net/url"
 	"time"
 
+	"github.com/grid-org/grid/internal/api"
 	"github.com/grid-org/grid/internal/client"
+	"github.com/grid-org/grid/internal/common"
 	"github.com/grid-org/grid/internal/config"
 
 	"github.com/charmbracelet/log"
+	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
 type Controller struct {
+	api    *api.API
 	config *config.Config
 	client *client.Client
+	server *server.Server
 }
 
-func New(cfg *config.Config, c *client.Client) *Controller {
+func New(cfg *config.Config) *Controller {
 	return &Controller{
 		config: cfg,
-		client: c,
 	}
 }
 
 func (c *Controller) Start() error {
-	// Ensure streams
-	log.Info("Ensuring requests stream")
-	requests, err := c.client.EnsureStream(jetstream.StreamConfig{
-		Name:      "requests",
-		Subjects:  []string{"request.>"},
-		Retention: jetstream.WorkQueuePolicy, // Only deliver to one controller
-		Discard:   jetstream.DiscardOld,
-		Replicas:  1,
-	})
-	if err != nil {
-		return fmt.Errorf("Error ensuring stream: %w", err)
+	var err error
+
+	// Create server
+	log.Debug("Creating NATS server")
+	serverOpts := &server.Options{
+		ServerName:         c.config.NATS.Name,
+		Host:               c.config.NATS.Server.Host,
+		Port:               c.config.NATS.Server.Port,
+		JetStream:          true,
+		JetStreamMaxMemory: c.config.NATS.JetStream.MaxMemory,
+		JetStreamMaxStore:  c.config.NATS.JetStream.MaxStore,
+		StoreDir:           c.config.NATS.JetStream.StoreDir,
+		NoSigs:             true,
 	}
 
-	log.Info("Ensuring job stream")
+	if c.config.NATS.Cluster.Enabled {
+		serverOpts.Cluster = server.ClusterOpts{
+			Name: c.config.NATS.Cluster.Name,
+			Host: c.config.NATS.Cluster.Host,
+			Port: c.config.NATS.Cluster.Port,
+		}
+		serverOpts.Routes = []*url.URL{}
+		for _, route := range c.config.NATS.Cluster.Routes {
+			serverOpts.Routes = append(serverOpts.Routes, &url.URL{
+				Scheme: "nats",
+				Host:   route,
+			})
+		}
+	}
+
+	if c.config.NATS.HTTP.Enabled {
+		serverOpts.HTTPHost = c.config.NATS.HTTP.Host
+		serverOpts.HTTPPort = c.config.NATS.HTTP.Port
+	}
+
+	c.server, err = server.NewServer(serverOpts)
+	if err != nil {
+		return fmt.Errorf("Error creating NATS server: %w", err)
+	}
+
+	// Start server
+	log.Debug("Starting NATS server")
+	c.server.Start()
+	if !c.server.ReadyForConnections(10 * time.Second) {
+		return fmt.Errorf("Error starting NATS server: %w", err)
+	}
+	defer c.server.Shutdown()
+
+	// Connect to server
+	log.Debug("Connecting to NATS server over IPC")
+	c.client, err = client.New(c.config, nats.InProcessServer(c.server))
+	if err != nil {
+		return fmt.Errorf("Error connecting to NATS server: %w", err)
+	}
+	defer c.client.Close()
+
+	// Ensure streams
+	log.Debug("Ensuring jobs stream")
 	if _, err := c.client.EnsureStream(jetstream.StreamConfig{
 		Name:      "jobs",
 		Subjects:  []string{"job.*.>"},
-		Retention: jetstream.InterestPolicy, // Remove acknowledged messages
-		Discard:   jetstream.DiscardNew,
-		MaxMsgs:   1, // Only one job at a time
-		Replicas:  1,
+		Retention: jetstream.LimitsPolicy,
+		Discard:   jetstream.DiscardOld,
+		Replicas:  c.config.NATS.JetStream.Replicas,
 	}); err != nil {
 		return fmt.Errorf("Error ensuring stream: %w", err)
 	}
 
-	// Create consumer
-	log.Info("Creating consumer")
-	cons, err := c.client.EnsureConsumer(requests, jetstream.ConsumerConfig{
-		Durable:        "controller",
-		FilterSubjects: []string{"request.>"},
-		DeliverPolicy:  jetstream.DeliverAllPolicy,
-		AckPolicy:      jetstream.AckExplicitPolicy,
-		MaxAckPending:  1,
-	})
-	if err != nil {
-		return fmt.Errorf("Error creating consumer: %w", err)
-	}
-
 	// Create cluster bucket
-	log.Info("Creating key-value bucket")
+	log.Debug("Creating key-value bucket")
 	if _, err := c.client.EnsureKV(jetstream.KeyValueConfig{
 		Bucket: "cluster",
 	}); err != nil {
@@ -72,73 +107,33 @@ func (c *Controller) Start() error {
 	}
 
 	// Store cluster status
-	log.Info("Storing cluster status")
+	log.Debug("Storing cluster status")
 	if err := c.client.PutKV("cluster", "status", []byte("active")); err != nil {
 		return fmt.Errorf("Error storing cluster status: %w", err)
 	}
 
 	// Create jobs bucket
-	log.Info("Ensuring jobs bucket")
+	log.Debug("Ensuring jobs bucket")
 	if _, err := c.client.EnsureKV(jetstream.KeyValueConfig{
 		Bucket: "jobs",
 	}); err != nil {
 		return fmt.Errorf("Error ensuring jobs bucket: %w", err)
 	}
 
-	// Start consuming
-	log.Info("Consuming requests")
-	if _, err := cons.Consume(c.handleRequest); err != nil {
-		return fmt.Errorf("Error consuming: %w", err)
-	}
-
 	log.Info("Controller started")
+
+	if c.config.API.Enabled {
+		c.api = api.New(c.config, c.client)
+		err = c.api.Start()
+		if err != nil {
+			return fmt.Errorf("Error starting API server: %w", err)
+		}
+	}
+
+	common.WaitForSignal()
+
+	if err := c.api.Stop(); err != nil {
+		return err
+	}
 	return nil
-}
-
-func (c *Controller) handleRequest(msg jetstream.Msg) {
-	meta, err := msg.Metadata()
-	if err != nil {
-		log.Error("Error getting metadata", "error", err)
-		msg.TermWithReason(fmt.Sprintf("error getting metadata: %v", err))
-		return
-	}
-
-	job := client.Job{
-		ID: 	 meta.Sequence.Stream,
-		Backend: msg.Headers().Get("backend"),
-		Action:  msg.Headers().Get("action"),
-		Payload: string(msg.Data()),
-		Timestamp: meta.Timestamp,
-	}
-
-	log.Info("Received request",
-		"id", job.ID,
-		"backend", job.Backend,
-		"action", job.Action,
-		"payload", job.Payload,
-		"timestamp", job.Timestamp.Format(time.RFC3339),
-	)
-
-	// Push to job stream
-	jobSubject := fmt.Sprintf("job.all.%s", job.Backend)
-	jobMsg := &nats.Msg{
-		Subject: jobSubject,
-		Data:    msg.Data(),
-		Header:  msg.Headers(),
-	}
-	if _, err := c.client.Publish(jobMsg); err != nil {
-		// Will retry after a delay
-		if err := msg.NakWithDelay(time.Second * 5); err != nil {
-			log.Error("Error nacking request with delay", "error", err)
-		} else {
-			log.Info("Nacked request with delay", "id", job.ID, "backend", job.Backend, "action", job.Action)
-		}
-	} else {
-		// Acknowledge
-		if err := msg.Ack(); err != nil {
-			log.Error("Error acknowledging request", "error", err)
-		} else {
-			log.Info("Acknowledged request", "id", job.ID, "backend", job.Backend, "action", job.Action)
-		}
-	}
 }

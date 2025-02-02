@@ -24,7 +24,7 @@ type Status struct {
 	Statistics nats.Statistics `json:"statistics"`
 }
 
-func New(cfg *config.Config) (*Client, error) {
+func New(cfg *config.Config, ipc nats.Option) (*Client, error) {
 	ncOpts := []nats.Option{
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
@@ -41,7 +41,11 @@ func New(cfg *config.Config) (*Client, error) {
 		}),
 	}
 
-	nc, err := nats.Connect(strings.Join(cfg.NATS.URLS, ","), ncOpts...)
+	if ipc != nil {
+		ncOpts = append(ncOpts, ipc)
+	}
+
+	nc, err := nats.Connect(strings.Join(cfg.NATS.Client.URLS, ","), ncOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -70,11 +74,11 @@ func (c *Client) Close() {
 	c.nc.Close()
 }
 
-func (c *Client) EnsureStream(jscfg jetstream.StreamConfig) (jetstream.Stream, error) {
+func (c *Client) GetStream(name string) (jetstream.Stream, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	stream, err := c.js.CreateOrUpdateStream(ctx, jscfg)
+	stream, err := c.js.Stream(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -82,11 +86,18 @@ func (c *Client) EnsureStream(jscfg jetstream.StreamConfig) (jetstream.Stream, e
 	return stream, nil
 }
 
-func (c *Client) GetStream(name string) (jetstream.Stream, error) {
+func (c *Client) EnsureStream(jscfg jetstream.StreamConfig) (jetstream.Stream, error) {
+	stream, err := c.GetStream(jscfg.Name)
+	if err == nil {
+		return stream, nil
+	} else if err != jetstream.ErrStreamNotFound {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	stream, err := c.js.Stream(ctx, name)
+	stream, err = c.js.CreateOrUpdateStream(ctx, jscfg)
 	if err != nil {
 		return nil, err
 	}
@@ -106,16 +117,28 @@ func (c *Client) EnsureConsumer(stream jetstream.Stream, cfg jetstream.ConsumerC
 	return consumer, nil
 }
 
-func (c *Client) EnsureKV(cfg jetstream.KeyValueConfig) (jetstream.KeyValue, error) {
+func (c *Client) GetConsumer(stream jetstream.Stream, name string) (jetstream.Consumer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	bucket, err := c.js.CreateKeyValue(ctx, cfg)
+	consumer, err := stream.Consumer(ctx, name)
 	if err != nil {
 		return nil, err
 	}
 
-	return bucket, nil
+	return consumer, nil
+}
+
+func (c *Client) DeleteConsumer(stream jetstream.Stream, name string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := stream.DeleteConsumer(ctx, name)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (c *Client) Publish(msg *nats.Msg) (*jetstream.PubAck, error) {

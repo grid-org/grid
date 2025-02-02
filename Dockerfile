@@ -9,8 +9,8 @@ RUN go mod download
 COPY . .
 
 # Build API binary
-FROM builder AS build-api
-RUN go build -o bin/api ./cmd/api
+# FROM builder AS build-api
+# RUN go build -o bin/api ./cmd/api
 
 # Build Controller binary
 FROM builder AS build-controller
@@ -24,12 +24,12 @@ RUN go build -o bin/worker ./cmd/worker
 FROM ubuntu:22.04 AS base
 WORKDIR /app
 # RUN apk add --no-cache ca-certificates
-# RUN apt-get update && apt-get install -y ca-certificates
+RUN apt-get update && apt-get install -y ca-certificates
 
 # API image
-FROM base AS api
-COPY --from=build-api /workspace/bin/api /app/api
-ENTRYPOINT ["/app/api"]
+# FROM base AS api
+# COPY --from=build-api /workspace/bin/api /app/api
+# ENTRYPOINT ["/app/api"]
 
 # Controller image
 FROM base AS controller

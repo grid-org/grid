@@ -2,35 +2,44 @@ package main
 
 import (
 	"github.com/alecthomas/kong"
-	"github.com/grid-org/grid/internal/cli"
-	"github.com/grid-org/grid/internal/common"
+	"github.com/charmbracelet/log"
+	"github.com/grid-org/grid/internal/config"
 	"github.com/grid-org/grid/internal/controller"
 )
 
-type ControllerCLI struct {
-	CLI *cli.CLI `embed:""`
+type CLI struct {
+	Config string `name:"config" short:"c" help:"Path to config file" default:"./config.yaml"`
+	Debug  bool   `name:"debug" short:"d" help:"Enable debug logging"`
 }
 
 func main() {
-	app := &ControllerCLI{}
-	appCtx := &cli.Context{}
+	app := &CLI{}
+	appCfg := &config.Config{}
 	ctx := kong.Parse(app,
 		kong.ConfigureHelp(kong.HelpOptions{
-			Compact: true,
+			Compact:   true,
 			FlagsLast: true,
-			Summary: true,
+			Summary:   true,
 		}),
-		kong.Bind(appCtx),
+		kong.Bind(appCfg),
 	)
 	ctx.FatalIfErrorf(ctx.Run())
 }
 
-func (*ControllerCLI) Run(ctx *cli.Context) error {
-	c := controller.New(ctx.Config, ctx.Client)
-	if err := c.Start(); err != nil {
+func (c *CLI) AfterApply(cfg *config.Config) error {
+	if c.Debug {
+		log.SetLevel(log.DebugLevel)
+	}
+
+	*cfg = *config.LoadConfig(c.Config)
+	return nil
+}
+
+func (c *CLI) Run(cfg *config.Config) error {
+	con := controller.New(cfg)
+	if err := con.Start(); err != nil {
 		return err
 	}
 
-	common.WaitForSignal()
 	return nil
 }

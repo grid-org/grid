@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"strconv"
@@ -18,6 +19,7 @@ type J map[string]any
 type API struct {
 	config *config.Config
 	client *client.Client
+	echo   *echo.Echo
 }
 
 type Request struct {
@@ -31,37 +33,44 @@ func New(cfg *config.Config, c *client.Client) *API {
 	return &API{
 		config: cfg,
 		client: c,
+		echo:   echo.New(),
 	}
 }
 
-func (a *API) Start() (*echo.Echo, error) {
-	e := echo.New()
-	e.HideBanner = true
-	e.HidePort = true
+func (a *API) Start() error {
+	a.echo.HideBanner = true
+	a.echo.HidePort = true
 
 	// Middleware
-	e.Use(echoLogger())
+	a.echo.Use(echoLogger())
 
 	// Public routes
-	e.GET("/status", a.getStatus)
-	e.GET("/job", a.getJob)
-	e.POST("/job", a.postJob)
+	a.echo.GET("/status", a.getStatus)
+	a.echo.GET("/job", a.getJob)
+	a.echo.POST("/job", a.postJob)
 
 	// Secure routes
-	secure := e.Group("/api")
+	secure := a.echo.Group("/api")
 	secure.Use(tokenAuth())
 
 	addr := net.JoinHostPort(a.config.API.Host, strconv.Itoa(a.config.API.Port))
 
 	// Start server in the background
 	go func() {
-		if err := e.Start(addr); err != nil && err != http.ErrServerClosed {
+		if err := a.echo.Start(addr); err != nil && err != http.ErrServerClosed {
 			log.Error("API server aborted", "error", err)
 		}
 	}()
 	log.Info("API server started", "address", addr)
 
-	return e, nil
+	return nil
+}
+
+func (a *API) Stop() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	return a.echo.Shutdown(ctx)
 }
 
 func (a *API) getStatus(ctx echo.Context) error {
@@ -86,13 +95,5 @@ func (a *API) getJob(ctx echo.Context) error {
 func (a *API) postJob(ctx echo.Context) error {
 	var job client.Job
 	ctx.Bind(&job)
-	// action := ctx.Param("action")
-	// payload := ctx.Param("payload")
-
-	// req := client.Request{
-	// 	Action:  action,
-	// 	Payload: payload,
-	// }
-
 	return ctx.JSON(http.StatusAccepted, a.client.NewJob(job))
 }
