@@ -1,0 +1,12 @@
+target:
+  scope: all
+strategy: continue
+tasks:
+  - backend: test
+    action: flaky
+    params:
+      rate: "50"
+  - backend: ping
+    action: echo
+    params:
+      message: "continued past flaky step"

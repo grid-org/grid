@@ -1,0 +1,6 @@
+target:
+  scope: group
+  value: web
+tasks:
+  - backend: ping
+    action: hostname

@@ -15,11 +15,18 @@ task                  # or: task default
 # Clean build artifacts
 task clean
 
-# Run with Docker Compose
+# Run with Docker Compose (basic: 1 controller, 2 workers)
 docker compose up --build
+
+# Run scenario tests (multi-group cluster with job validation)
+task scenario -- scenarios/jobs/smoke-test.yaml
+task scenario:up                    # start cluster, leave running
+task scenario:down                  # tear down cluster
 ```
 
 Binaries: `bin/grid` (controller), `bin/gridw` (worker), `bin/gridc` (CLI client).
+
+The CLI client (`gridc`) is HTTP-only — it talks to the controller API, not NATS directly. Use `-a` or `GRID_API` env var to set the controller address.
 
 ## Project Structure
 
@@ -41,6 +48,11 @@ internal/
     backends/           Backend interface + implementations (apt, systemd, rke2, ping, test)
 docs/
   DESIGN.md             Architecture, data model, NATS topology, implementation phases
+scenarios/
+  compose.yaml          Multi-group Docker Compose topology (controller + web + db workers)
+  configs/              Per-role config files (controller.yaml, web.yaml, db.yaml)
+  jobs/                 YAML job files for scenario testing
+  run.sh                Scenario runner (builds gridc, starts cluster, runs job, tears down)
 ```
 
 ## Key Patterns
@@ -91,4 +103,5 @@ Tests use **embedded NATS** — no external dependencies. Each test spins up an 
 - NATS subject names use dots as delimiters
 - Config field names use `snake_case` in YAML, Go struct tags for mapping
 - Models use JSON and YAML struct tags for dual serialization
-- `go.sum` is gitignored; run `go mod tidy` before building
+- `go.sum` is committed (Go best practice for reproducible builds)
+- NATS is internal only (controller ↔ workers); clients use HTTP API

@@ -7,17 +7,16 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/alecthomas/kong"
 	"github.com/charmbracelet/log"
 	"github.com/goccy/go-yaml"
-	"github.com/grid-org/grid/internal/client"
-	"github.com/grid-org/grid/internal/config"
 	"github.com/grid-org/grid/internal/models"
 )
 
 type CLI struct {
-	Config string    `name:"config" short:"c" help:"Path to config file" default:"./config.yaml"`
+	API    string    `name:"api" short:"a" help:"Controller API address" default:"http://localhost:8765" env:"GRID_API"`
 	Debug  bool      `name:"debug" short:"d" help:"Enable debug logging"`
 	Job    JobCmd    `cmd:"" help:"Job management"`
 	Node   NodeCmd   `cmd:"" help:"Node management"`
@@ -36,9 +35,9 @@ type JobCmd struct {
 type RunJobCmd struct {
 	Target   string `name:"target" short:"t" help:"Target (all, group:<name>, node:<id>)" default:"all"`
 	File     string `name:"file" short:"f" help:"Job file (YAML)" optional:""`
-	Strategy string `name:"strategy" short:"s" help:"Failure strategy (fail-fast, continue)" default:"fail-fast"`
+	Strategy string `name:"strategy" short:"s" help:"Failure strategy (fail-fast, continue)" optional:""`
 	Timeout  string `name:"timeout" help:"Overall job timeout (e.g. 30m, 1h)" optional:""`
-	API      string `name:"api" short:"a" help:"Controller API address" default:"http://localhost:8765"`
+	Wait     bool   `name:"wait" short:"w" help:"Wait for job to complete and print result"`
 
 	// Inline single-task shorthand: gridc job run -t all apt install package=curl
 	Backend string   `arg:"" help:"Backend name" optional:""`
@@ -47,13 +46,11 @@ type RunJobCmd struct {
 }
 
 type GetJobCmd struct {
-	ID  string `arg:"" help:"Job ID"`
-	API string `name:"api" short:"a" help:"Controller API address" default:"http://localhost:8765"`
+	ID string `arg:"" help:"Job ID"`
 }
 
 type CancelJobCmd struct {
-	ID  string `arg:"" help:"Job ID"`
-	API string `name:"api" short:"a" help:"Controller API address" default:"http://localhost:8765"`
+	ID string `arg:"" help:"Job ID"`
 }
 
 type ListJobCmd struct{}
@@ -77,45 +74,64 @@ type StatusCmd struct{}
 
 func main() {
 	app := &CLI{}
-	appCfg := &config.Config{}
-	appClient := &client.Client{}
 	ctx := kong.Parse(app,
 		kong.ConfigureHelp(kong.HelpOptions{
 			Compact:   true,
 			FlagsLast: true,
 			Summary:   true,
 		}),
-		kong.Bind(appCfg),
-		kong.Bind(appClient),
 	)
-	ctx.FatalIfErrorf(ctx.Run(appCfg, appClient))
-}
-
-func (c *CLI) AfterApply(cfg *config.Config, cl *client.Client) error {
-	if c.Debug {
+	if app.Debug {
 		log.SetLevel(log.DebugLevel)
 	}
+	ctx.FatalIfErrorf(ctx.Run(app))
+}
 
-	*cfg = *config.LoadConfig(c.Config)
+// -- HTTP helpers --
 
-	nc, err := client.New(cfg, nil)
+func apiGet(api, path string) ([]byte, error) {
+	resp, err := http.Get(api + path)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("GET %s: %w", path, err)
 	}
-	*cl = *nc
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+	return body, nil
+}
 
-	return nil
+func apiPost(api, path string, payload any) ([]byte, int, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, 0, fmt.Errorf("encoding request: %w", err)
+	}
+	resp, err := http.Post(api+path, "application/json", bytes.NewReader(data))
+	if err != nil {
+		return nil, 0, fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("reading response: %w", err)
+	}
+	return body, resp.StatusCode, nil
 }
 
 // -- Job run --
 
-func (r *RunJobCmd) Run(cfg *config.Config, cl *client.Client) error {
+func (r *RunJobCmd) Run(app *CLI) error {
 	target := parseTarget(r.Target)
 
 	var tasks []models.Task
+	var strategy models.Strategy
+	var timeout string
 
 	if r.File != "" {
-		// Load from file
 		data, err := os.ReadFile(r.File)
 		if err != nil {
 			return fmt.Errorf("reading job file: %w", err)
@@ -126,8 +142,13 @@ func (r *RunJobCmd) Run(cfg *config.Config, cl *client.Client) error {
 		}
 		target = jf.Target
 		tasks = jf.Tasks
+		if jf.Strategy != "" {
+			strategy = jf.Strategy
+		}
+		if jf.Timeout != "" {
+			timeout = jf.Timeout
+		}
 	} else {
-		// Build single-task from CLI args
 		if r.Backend == "" || r.Action == "" {
 			return fmt.Errorf("provide backend and action, or use -f for a job file")
 		}
@@ -135,58 +156,89 @@ func (r *RunJobCmd) Run(cfg *config.Config, cl *client.Client) error {
 		tasks = []models.Task{{Backend: r.Backend, Action: r.Action, Params: params}}
 	}
 
-	// Submit via HTTP API
+	// CLI flags override file values
+	if r.Strategy != "" {
+		strategy = models.Strategy(r.Strategy)
+	}
+	if strategy == "" {
+		strategy = models.StrategyFailFast
+	}
+	if r.Timeout != "" {
+		timeout = r.Timeout
+	}
+
 	reqBody := map[string]any{
 		"target":   target,
 		"tasks":    tasks,
-		"strategy": r.Strategy,
+		"strategy": strategy,
 	}
-	if r.Timeout != "" {
-		reqBody["timeout"] = r.Timeout
-	}
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return fmt.Errorf("encoding request: %w", err)
+	if timeout != "" {
+		reqBody["timeout"] = timeout
 	}
 
-	resp, err := http.Post(r.API+"/job", "application/json", bytes.NewReader(body))
+	body, status, err := apiPost(app.API, "/job", reqBody)
 	if err != nil {
-		return fmt.Errorf("submitting job to %s: %w", r.API, err)
+		return err
 	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusAccepted {
-		return fmt.Errorf("API error (%d): %s", resp.StatusCode, string(respBody))
+	if status != http.StatusAccepted {
+		return fmt.Errorf("API error (%d): %s", status, string(body))
 	}
 
 	var job models.Job
-	if err := json.Unmarshal(respBody, &job); err != nil {
-		fmt.Println(string(respBody))
+	if err := json.Unmarshal(body, &job); err != nil {
+		fmt.Println(string(body))
 		return nil
 	}
 
-	fmt.Printf("Job %s submitted (%d tasks, target=%s, strategy=%s)\n", job.ID, len(job.Tasks), r.Target, job.Strategy)
+	fmt.Printf("Job %s submitted (%d tasks, target=%s:%s, strategy=%s)\n",
+		job.ID, len(job.Tasks), job.Target.Scope, job.Target.Value, job.Strategy)
 	fmt.Printf("Expected nodes: %v\n", job.Expected)
-	return nil
+
+	if !r.Wait {
+		return nil
+	}
+
+	return waitForJob(app.API, job.ID)
+}
+
+func waitForJob(api, jobID string) error {
+	fmt.Println("Waiting for completion...")
+
+	for {
+		body, err := apiGet(api, "/job/"+jobID)
+		if err != nil {
+			return err
+		}
+
+		var job models.Job
+		if err := json.Unmarshal(body, &job); err != nil {
+			return fmt.Errorf("parsing job: %w", err)
+		}
+
+		switch job.Status {
+		case models.JobCompleted, models.JobFailed, models.JobCancelled:
+			fmt.Printf("\nJob %s %s\n", job.ID, job.Status)
+			data, _ := json.MarshalIndent(job.Results, "", "  ")
+			fmt.Println(string(data))
+			if job.Status != models.JobCompleted {
+				os.Exit(1)
+			}
+			return nil
+		}
+
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // -- Job cancel --
 
-func (c *CancelJobCmd) Run(cfg *config.Config, cl *client.Client) error {
-	resp, err := http.Post(c.API+"/job/"+c.ID+"/cancel", "application/json", nil)
+func (c *CancelJobCmd) Run(app *CLI) error {
+	body, status, err := apiPost(app.API, "/job/"+c.ID+"/cancel", nil)
 	if err != nil {
-		return fmt.Errorf("cancelling job: %w", err)
+		return err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("cancel failed (%d): %s", resp.StatusCode, string(body))
+	if status != http.StatusOK {
+		return fmt.Errorf("cancel failed (%d): %s", status, string(body))
 	}
 
 	fmt.Printf("Job %s cancelled\n", c.ID)
@@ -195,10 +247,16 @@ func (c *CancelJobCmd) Run(cfg *config.Config, cl *client.Client) error {
 
 // -- Job get --
 
-func (g *GetJobCmd) Run(cfg *config.Config, cl *client.Client) error {
-	job, err := cl.GetJob(g.ID)
+func (g *GetJobCmd) Run(app *CLI) error {
+	body, err := apiGet(app.API, "/job/"+g.ID)
 	if err != nil {
 		return err
+	}
+
+	var job models.Job
+	if err := json.Unmarshal(body, &job); err != nil {
+		fmt.Println(string(body))
+		return nil
 	}
 
 	data, _ := json.MarshalIndent(job, "", "  ")
@@ -208,10 +266,16 @@ func (g *GetJobCmd) Run(cfg *config.Config, cl *client.Client) error {
 
 // -- Job list --
 
-func (l *ListJobCmd) Run(cfg *config.Config, cl *client.Client) error {
-	jobs, err := cl.ListJobs()
+func (l *ListJobCmd) Run(app *CLI) error {
+	body, err := apiGet(app.API, "/jobs")
 	if err != nil {
 		return err
+	}
+
+	var jobs []models.Job
+	if err := json.Unmarshal(body, &jobs); err != nil {
+		fmt.Println(string(body))
+		return nil
 	}
 
 	if len(jobs) == 0 {
@@ -229,10 +293,16 @@ func (l *ListJobCmd) Run(cfg *config.Config, cl *client.Client) error {
 
 // -- Node list --
 
-func (n *NodeListCmd) Run(cfg *config.Config, cl *client.Client) error {
-	nodes, err := cl.ListNodes()
+func (n *NodeListCmd) Run(app *CLI) error {
+	body, err := apiGet(app.API, "/nodes")
 	if err != nil {
 		return err
+	}
+
+	var nodes []models.NodeInfo
+	if err := json.Unmarshal(body, &nodes); err != nil {
+		fmt.Println(string(body))
+		return nil
 	}
 
 	if len(nodes) == 0 {
@@ -249,10 +319,16 @@ func (n *NodeListCmd) Run(cfg *config.Config, cl *client.Client) error {
 
 // -- Node info --
 
-func (n *NodeInfoCmd) Run(cfg *config.Config, cl *client.Client) error {
-	node, err := cl.GetNode(n.ID)
+func (n *NodeInfoCmd) Run(app *CLI) error {
+	body, err := apiGet(app.API, "/node/"+n.ID)
 	if err != nil {
 		return err
+	}
+
+	var node models.NodeInfo
+	if err := json.Unmarshal(body, &node); err != nil {
+		fmt.Println(string(body))
+		return nil
 	}
 
 	data, _ := json.MarshalIndent(node, "", "  ")
@@ -262,12 +338,12 @@ func (n *NodeInfoCmd) Run(cfg *config.Config, cl *client.Client) error {
 
 // -- Status --
 
-func (s *StatusCmd) Run(cfg *config.Config, cl *client.Client) error {
-	status, err := cl.GetClusterStatus()
+func (s *StatusCmd) Run(app *CLI) error {
+	body, err := apiGet(app.API, "/status")
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(status.Value()))
+	fmt.Println(string(body))
 	return nil
 }
 

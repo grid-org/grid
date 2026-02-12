@@ -1,42 +1,4 @@
 services:
-  # bootstrap:
-  #   image: nats:latest
-  #   ports:
-  #   - "4222:4222"
-  #   - "8222:8222"
-  #   configs:
-  #   - source: nats
-  #     target: /etc/nats/server.conf
-  #   command: ["-c", "/etc/nats/server.conf", "-n", "bootstrap"]
-
-  # nats1:
-  #   image: nats:latest
-  #   configs:
-  #   - source: nats
-  #     target: /etc/nats/server.conf
-  #   command: ["-c", "/etc/nats/server.conf", "-n", "nats1"]
-
-  # nats2:
-  #   image: nats:latest
-  #   configs:
-  #   - source: nats
-  #     target: /etc/nats/server.conf
-  #   command: ["-c", "/etc/nats/server.conf", "-n", "nats2"]
-
-  # api:
-  #   build:
-  #     context: .
-  #     target: api
-  #   ports:
-  #   - "8765:8765"
-  #   restart: always
-  #   configs:
-  #   - source: grid
-  #     target: /etc/grid/config.yaml
-  #   volumes:
-  #   - .:/workspace
-  #   command: ["-c", "/etc/grid/config.yaml"]
-
   controller:
     build:
       context: .
@@ -46,12 +8,9 @@ services:
     configs:
     - source: grid
       target: /etc/grid/config.yaml
-    deploy:
-      replicas: 1
     hostname: controller
     ports:
     - "4222:4222"
-    - "6222:6222"
     - "8222:8222"
     - "8765:8765"
     restart: always
@@ -65,7 +24,9 @@ services:
     - source: grid
       target: /etc/grid/config.yaml
     deploy:
-      replicas: 1
+      replicas: 2
+    depends_on:
+    - controller
     restart: always
 
 configs:
@@ -78,24 +39,8 @@ configs:
       nats:
         client:
           urls: ["nats://controller:4222"]
-        http:
-          enabled: true
-          host: 0.0.0.0
-          port: 8222
         server:
           host: 0.0.0.0
           port: 4222
-  # nats:
-  #   content: |
-  #     listen: 0.0.0.0:4222
-  #     monitor_port: 8222
-
-  #     cluster {
-  #       name: grid
-  #       listen: 0.0.0.0:6222
-  #       routes: [
-  #         nats://bootstrap:6222
-  #       ]
-  #     }
-
-  #     jetstream {}
+      worker:
+        groups: ["default"]

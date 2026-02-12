@@ -17,10 +17,8 @@
 # Go workspace file
 go.work
 
-# Go module files
-go.sum
-
 # Miscellaneous
 .env
 .task/
 .vscode/
+.claude/

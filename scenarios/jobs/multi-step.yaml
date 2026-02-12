@@ -1,0 +1,17 @@
+target:
+  scope: group
+  value: prod
+tasks:
+  - backend: ping
+    action: echo
+    params:
+      message: "step 1: starting"
+  - backend: ping
+    action: sleep
+    params:
+      duration: "1s"
+  - backend: ping
+    action: echo
+    params:
+      message: "step 3: done"
+timeout: "30s"

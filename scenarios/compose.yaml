@@ -1,0 +1,50 @@
+services:
+  controller:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: controller
+    command: ["-c", "/etc/grid/config.yaml"]
+    volumes:
+    - ./configs/controller.yaml:/etc/grid/config.yaml:ro
+    hostname: controller
+    ports:
+    - "4222:4222"
+    - "8765:8765"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8765/nodes || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: worker
+    command: ["-c", "/etc/grid/config.yaml"]
+    volumes:
+    - ./configs/web.yaml:/etc/grid/config.yaml:ro
+    deploy:
+      replicas: 2
+    depends_on:
+      controller:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: worker
+    command: ["-c", "/etc/grid/config.yaml"]
+    volumes:
+    - ./configs/db.yaml:/etc/grid/config.yaml:ro
+    deploy:
+      replicas: 1
+    depends_on:
+      controller:
+        condition: service_healthy
+    restart: unless-stopped
