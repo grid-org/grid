@@ -1,0 +1,17 @@
+target:
+  scope: all
+tasks:
+  - backend: ping
+    action: echo
+    params:
+      message: "step 1: succeeds"
+  - backend: ping
+    action: echo
+    condition: on_success
+    params:
+      message: "step 2: on_success — should run"
+  - backend: ping
+    action: echo
+    condition: on_failure
+    params:
+      message: "step 3: on_failure — should be skipped"

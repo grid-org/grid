@@ -98,7 +98,7 @@ func (c *Controller) Start() error {
 
 	// Initialize registry and scheduler
 	c.registry = registry.New(c.client)
-	c.scheduler = scheduler.New(c.client, c.registry)
+	c.scheduler = scheduler.New(c.client, c.registry, c.config.Scheduler)
 
 	// Start the scheduler's request-pulling loop
 	schedCtx, schedCancel := context.WithCancel(context.Background())

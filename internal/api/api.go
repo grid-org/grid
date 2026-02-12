@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"net"
 	"net/http"
 	"strconv"
@@ -121,6 +122,9 @@ func (a *API) postJob(ctx echo.Context) error {
 
 	job, err := a.scheduler.Enqueue(job)
 	if err != nil {
+		if errors.Is(err, scheduler.ErrQueueFull) {
+			return ctx.JSON(http.StatusTooManyRequests, J{"error": "queue full"})
+		}
 		return ctx.JSON(http.StatusInternalServerError, J{"error": err.Error()})
 	}
 

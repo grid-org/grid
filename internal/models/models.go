@@ -15,7 +15,17 @@ type Task struct {
 	Params     map[string]string `json:"params" yaml:"params"`
 	Timeout    string            `json:"timeout,omitempty" yaml:"timeout,omitempty"`       // per-task timeout (e.g. "30s", "5m")
 	MaxRetries int              `json:"max_retries,omitempty" yaml:"max_retries,omitempty"` // max retry attempts on failure (0 = no retry)
+	Condition  Condition         `json:"condition,omitempty" yaml:"condition,omitempty"`    // when to execute: always, on_success, on_failure
 }
+
+// Condition controls when a task executes relative to prior step outcomes.
+type Condition string
+
+const (
+	ConditionAlways    Condition = "always"     // run regardless of prior step outcome (default)
+	ConditionOnSuccess Condition = "on_success" // run only if all prior steps succeeded
+	ConditionOnFailure Condition = "on_failure" // run only if any prior step failed
+)
 
 // Strategy controls how the scheduler handles task failures.
 type Strategy string
@@ -86,6 +96,7 @@ type ResultStatus string
 const (
 	ResultSuccess ResultStatus = "success"
 	ResultFailed  ResultStatus = "failed"
+	ResultSkipped ResultStatus = "skipped"
 )
 
 // NodeInfo is self-reported by each worker on startup and via heartbeat.

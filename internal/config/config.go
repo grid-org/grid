@@ -58,10 +58,16 @@ type WorkerConfig struct {
 	Groups []string `yaml:"groups"`
 }
 
+type SchedulerConfig struct {
+	MaxConcurrent int `yaml:"max_concurrent"` // max jobs running in parallel (default: 5)
+	MaxPending    int `yaml:"max_pending"`    // max jobs waiting in queue (default: 100)
+}
+
 type Config struct {
-	API    APIConfig    `yaml:"api"`
-	NATS   NATSConfig   `yaml:"nats"`
-	Worker WorkerConfig `yaml:"worker"`
+	API       APIConfig       `yaml:"api"`
+	NATS      NATSConfig      `yaml:"nats"`
+	Worker    WorkerConfig    `yaml:"worker"`
+	Scheduler SchedulerConfig `yaml:"scheduler"`
 }
 
 func LoadConfig(configFile string) *Config {
@@ -131,6 +137,10 @@ func Defaults() *Config {
 				Host: "localhost",
 				Port: 4222,
 			},
+		},
+		Scheduler: SchedulerConfig{
+			MaxConcurrent: 5,
+			MaxPending:    100,
 		},
 	}
 }
