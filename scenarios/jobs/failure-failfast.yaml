@@ -1,0 +1,12 @@
+target:
+  scope: all
+strategy: fail-fast
+tasks:
+  - backend: test
+    action: fail
+    params:
+      message: "intentional failure"
+  - backend: ping
+    action: echo
+    params:
+      message: "should never reach this"

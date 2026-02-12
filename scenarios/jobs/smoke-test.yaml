@@ -1,0 +1,7 @@
+target:
+  scope: all
+tasks:
+  - backend: ping
+    action: echo
+    params:
+      message: "smoke test OK"

@@ -24,6 +24,26 @@ tasks:
     cmds:
     - go test ./... -v -race -count=1
 
+  scenario:
+    desc: "Run a scenario job against a local compose cluster"
+    cmds:
+    - ./scenarios/run.sh {{.CLI_ARGS}}
+
+  scenario:up:
+    desc: "Start the scenario cluster (stays running)"
+    cmds:
+    - docker compose -f scenarios/compose.yaml up -d --build --wait
+
+  scenario:down:
+    desc: "Tear down the scenario cluster"
+    cmds:
+    - docker compose -f scenarios/compose.yaml down --timeout 5
+
+  scenario:logs:
+    desc: "Tail scenario cluster logs"
+    cmds:
+    - docker compose -f scenarios/compose.yaml logs -f
+
   clean:
     desc: "Clean up"
     cmds:

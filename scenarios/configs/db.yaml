@@ -1,0 +1,5 @@
+nats:
+  client:
+    urls: ["nats://controller:4222"]
+worker:
+  groups: ["db", "prod"]
