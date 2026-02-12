@@ -10,9 +10,11 @@ type Target struct {
 
 // Task is a single unit of work executed by one backend.
 type Task struct {
-	Backend string            `json:"backend" yaml:"backend"`
-	Action  string            `json:"action" yaml:"action"`
-	Params  map[string]string `json:"params" yaml:"params"`
+	Backend    string            `json:"backend" yaml:"backend"`
+	Action     string            `json:"action" yaml:"action"`
+	Params     map[string]string `json:"params" yaml:"params"`
+	Timeout    string            `json:"timeout,omitempty" yaml:"timeout,omitempty"`       // per-task timeout (e.g. "30s", "5m")
+	MaxRetries int              `json:"max_retries,omitempty" yaml:"max_retries,omitempty"` // max retry attempts on failure (0 = no retry)
 }
 
 // Strategy controls how the scheduler handles task failures.
@@ -29,6 +31,7 @@ type NodeResult struct {
 	Output   string       `json:"output,omitempty"`
 	Error    string       `json:"error,omitempty"`
 	Duration string       `json:"duration"`
+	Attempts int          `json:"attempts,omitempty"` // number of attempts (>1 if retried)
 }
 
 // JobResults maps step index (as string) → nodeID → NodeResult.
@@ -42,6 +45,7 @@ type Job struct {
 	Target    Target     `json:"target"`
 	Tasks     []Task     `json:"tasks"`
 	Strategy  Strategy   `json:"strategy"`
+	Timeout   string     `json:"timeout,omitempty"` // overall job timeout (e.g. "30m")
 	Status    JobStatus  `json:"status"`
 	Step      int        `json:"step"`      // current task index
 	Expected  []string   `json:"expected"`  // resolved node IDs
@@ -49,6 +53,10 @@ type Job struct {
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
 }
+
+const (
+	JobCancelled JobStatus = "cancelled"
+)
 
 // JobStatus represents the lifecycle state of a job.
 type JobStatus string
@@ -92,6 +100,8 @@ type NodeInfo struct {
 
 // JobFile is the YAML structure for submitting multi-task jobs from a file.
 type JobFile struct {
-	Target Target `json:"target" yaml:"target"`
-	Tasks  []Task `json:"tasks" yaml:"tasks"`
+	Target   Target   `json:"target" yaml:"target"`
+	Tasks    []Task   `json:"tasks" yaml:"tasks"`
+	Strategy Strategy `json:"strategy,omitempty" yaml:"strategy,omitempty"`
+	Timeout  string   `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 }

@@ -32,6 +32,7 @@ type JobRequest struct {
 	Target   models.Target   `json:"target"`
 	Tasks    []models.Task   `json:"tasks"`
 	Strategy models.Strategy `json:"strategy,omitempty"`
+	Timeout  string          `json:"timeout,omitempty"` // overall job timeout (e.g. "30m")
 }
 
 func New(cfg *config.Config, c *client.Client, sched *scheduler.Scheduler) *API {
@@ -52,6 +53,7 @@ func (a *API) Start() error {
 	a.echo.GET("/status", a.getStatus)
 	a.echo.POST("/job", a.postJob)
 	a.echo.GET("/job/:id", a.getJob)
+	a.echo.POST("/job/:id/cancel", a.cancelJob)
 	a.echo.GET("/jobs", a.listJobs)
 	a.echo.GET("/nodes", a.listNodes)
 	a.echo.GET("/node/:id", a.getNode)
@@ -107,6 +109,7 @@ func (a *API) postJob(ctx echo.Context) error {
 		Target:   req.Target,
 		Tasks:    req.Tasks,
 		Strategy: strategy,
+		Timeout:  req.Timeout,
 	}
 
 	job, err := a.scheduler.Enqueue(job)
@@ -115,6 +118,21 @@ func (a *API) postJob(ctx echo.Context) error {
 	}
 
 	return ctx.JSON(http.StatusAccepted, job)
+}
+
+func (a *API) cancelJob(ctx echo.Context) error {
+	id := ctx.Param("id")
+
+	cancelled, err := a.scheduler.Cancel(id)
+	if err != nil {
+		return ctx.JSON(http.StatusNotFound, J{"error": err.Error()})
+	}
+
+	if !cancelled {
+		return ctx.JSON(http.StatusConflict, J{"error": "job is not running or pending"})
+	}
+
+	return ctx.JSON(http.StatusOK, J{"status": "cancelled", "id": id})
 }
 
 func (a *API) getJob(ctx echo.Context) error {

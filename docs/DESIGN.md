@@ -80,9 +80,11 @@ A single unit of work executed by one backend.
 
 ```go
 type Task struct {
-    Backend string            `json:"backend"`
-    Action  string            `json:"action"`
-    Params  map[string]string `json:"params"`
+    Backend    string            `json:"backend"`
+    Action     string            `json:"action"`
+    Params     map[string]string `json:"params"`
+    Timeout    string            `json:"timeout,omitempty"`      // per-task timeout (e.g. "30s", "5m")
+    MaxRetries int              `json:"max_retries,omitempty"`   // retry attempts on failure (0 = no retry)
 }
 ```
 
@@ -100,14 +102,17 @@ does not begin until all targeted nodes have reported results for step N.
 
 ```go
 type Job struct {
-    ID        string    `json:"id"`
-    Target    Target    `json:"target"`
-    Tasks     []Task    `json:"tasks"`
-    Status    string    `json:"status"`    // pending | running | completed | failed
-    Step      int       `json:"step"`      // current task index
-    Expected  []string  `json:"expected"`  // resolved node IDs
-    CreatedAt time.Time `json:"created_at"`
-    UpdatedAt time.Time `json:"updated_at"`
+    ID        string     `json:"id"`
+    Target    Target     `json:"target"`
+    Tasks     []Task     `json:"tasks"`
+    Strategy  Strategy   `json:"strategy"`           // "fail-fast" | "continue"
+    Timeout   string     `json:"timeout,omitempty"`   // overall job timeout (e.g. "30m")
+    Status    JobStatus  `json:"status"`              // pending | running | completed | failed | cancelled
+    Step      int        `json:"step"`                // current task index
+    Expected  []string   `json:"expected"`            // resolved node IDs
+    Results   JobResults `json:"results,omitempty"`   // step → node → NodeResult
+    CreatedAt time.Time  `json:"created_at"`
+    UpdatedAt time.Time  `json:"updated_at"`
 }
 
 type Target struct {
@@ -468,9 +473,11 @@ tasks:
 ```
 POST /job                    Submit a new job
 GET  /job/:id                Get job status (includes per-node results)
-GET  /jobs                   List all jobs (with filters)
+POST /job/:id/cancel         Cancel a running or pending job
+GET  /jobs                   List all jobs
 GET  /nodes                  List registered nodes
 GET  /node/:id               Get node details
+GET  /status                 Get cluster status
 ```
 
 ### Example: POST /job
@@ -579,14 +586,16 @@ New code:
 - `internal/scheduler` -- the orchestration loop
 - `internal/registry` -- node registration and target resolution
 
-### Phase 2: Production Orchestration
+### Phase 2: Production Orchestration (Implemented)
 
-- Request stream (WorkQueue) for decoupled job submission
-- Job queuing and admission control
-- Configurable failure strategies (fail-fast, continue-on-error, rollback)
-- Job timeout configuration
-- Retry policies per task
-- Conditional task execution (only-if, on-failure)
+- ~~Request stream (WorkQueue) for decoupled job submission~~ ✓
+- ~~Configurable failure strategies (fail-fast, continue)~~ ✓
+- ~~Job timeout configuration~~ ✓ (per-job and per-task `timeout` fields)
+- ~~Retry policies per task~~ ✓ (`max_retries` with exponential backoff)
+- ~~Job cancellation~~ ✓ (`POST /job/:id/cancel`, scheduler context cancellation)
+- ~~Result persistence~~ ✓ (per-node, per-step results with attempts tracking)
+- Conditional task execution (only-if, on-failure) — deferred to Phase 3
+- Job queuing and admission control — deferred to Phase 3
 
 ### Phase 3: Production Hardening
 
