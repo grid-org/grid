@@ -130,67 +130,67 @@ func (c *Controller) Start() error {
 }
 
 func (c *Controller) ensureInfrastructure() error {
+	return EnsureInfrastructure(c.client, c.config.NATS.JetStream.Replicas)
+}
+
+// EnsureInfrastructure creates the required streams and KV buckets.
+// Exported so test helpers can reuse it without starting a full controller.
+func EnsureInfrastructure(c *client.Client, replicas int) error {
 	// Commands stream: controller dispatches commands to workers
-	log.Debug("Ensuring commands stream")
-	if _, err := c.client.EnsureStream(jetstream.StreamConfig{
+	if _, err := c.EnsureStream(jetstream.StreamConfig{
 		Name:      "commands",
 		Subjects:  []string{"cmd.>"},
 		Retention: jetstream.LimitsPolicy,
 		Discard:   jetstream.DiscardOld,
 		MaxAge:    1 * time.Hour,
-		Replicas:  c.config.NATS.JetStream.Replicas,
+		Replicas:  replicas,
 	}); err != nil {
 		return fmt.Errorf("ensuring commands stream: %w", err)
 	}
 
 	// Results stream: workers report results back to controller
-	log.Debug("Ensuring results stream")
-	if _, err := c.client.EnsureStream(jetstream.StreamConfig{
+	if _, err := c.EnsureStream(jetstream.StreamConfig{
 		Name:      "results",
 		Subjects:  []string{"result.>"},
 		Retention: jetstream.LimitsPolicy,
 		Discard:   jetstream.DiscardOld,
 		MaxAge:    1 * time.Hour,
-		Replicas:  c.config.NATS.JetStream.Replicas,
+		Replicas:  replicas,
 	}); err != nil {
 		return fmt.Errorf("ensuring results stream: %w", err)
 	}
 
 	// Requests stream: API enqueues jobs, scheduler pulls them (work queue)
-	log.Debug("Ensuring requests stream")
-	if _, err := c.client.EnsureStream(jetstream.StreamConfig{
+	if _, err := c.EnsureStream(jetstream.StreamConfig{
 		Name:      "requests",
 		Subjects:  []string{"request.>"},
 		Retention: jetstream.WorkQueuePolicy,
 		Discard:   jetstream.DiscardOld,
 		MaxAge:    1 * time.Hour,
-		Replicas:  c.config.NATS.JetStream.Replicas,
+		Replicas:  replicas,
 	}); err != nil {
 		return fmt.Errorf("ensuring requests stream: %w", err)
 	}
 
 	// KV: cluster status
-	log.Debug("Ensuring cluster KV bucket")
-	if _, err := c.client.EnsureKV(jetstream.KeyValueConfig{
+	if _, err := c.EnsureKV(jetstream.KeyValueConfig{
 		Bucket: "cluster",
 	}); err != nil {
 		return fmt.Errorf("ensuring cluster bucket: %w", err)
 	}
-	if err := c.client.PutKV("cluster", "status", []byte("active")); err != nil {
+	if err := c.PutKV("cluster", "status", []byte("active")); err != nil {
 		return fmt.Errorf("storing cluster status: %w", err)
 	}
 
 	// KV: job metadata
-	log.Debug("Ensuring jobs KV bucket")
-	if _, err := c.client.EnsureKV(jetstream.KeyValueConfig{
+	if _, err := c.EnsureKV(jetstream.KeyValueConfig{
 		Bucket: "jobs",
 	}); err != nil {
 		return fmt.Errorf("ensuring jobs bucket: %w", err)
 	}
 
 	// KV: node registration
-	log.Debug("Ensuring nodes KV bucket")
-	if _, err := c.client.EnsureKV(jetstream.KeyValueConfig{
+	if _, err := c.EnsureKV(jetstream.KeyValueConfig{
 		Bucket: "nodes",
 	}); err != nil {
 		return fmt.Errorf("ensuring nodes bucket: %w", err)
