@@ -35,7 +35,7 @@ type JobCmd struct {
 type RunJobCmd struct {
 	Target   string `name:"target" short:"t" help:"Target (all, group:<name>, node:<id>)" default:"all"`
 	File     string `name:"file" short:"f" help:"Job file (YAML)" optional:""`
-	Strategy string `name:"strategy" short:"s" help:"Failure strategy (fail-fast, continue)" default:"fail-fast"`
+	Strategy string `name:"strategy" short:"s" help:"Failure strategy (fail-fast, continue)" optional:""`
 	Timeout  string `name:"timeout" help:"Overall job timeout (e.g. 30m, 1h)" optional:""`
 	Wait     bool   `name:"wait" short:"w" help:"Wait for job to complete and print result"`
 

@@ -3,10 +3,10 @@ target:
 strategy: continue
 tasks:
   - backend: test
-    action: fail
+    action: flaky
     params:
-      message: "intentional failure"
+      rate: "50"
   - backend: ping
     action: echo
     params:
-      message: "continued past failure"
+      message: "continued past flaky step"
