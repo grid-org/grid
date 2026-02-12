@@ -36,15 +36,13 @@ type JobRequest struct {
 }
 
 func New(cfg *config.Config, c *client.Client, sched *scheduler.Scheduler) *API {
-	return &API{
+	a := &API{
 		config:    cfg,
 		client:    c,
 		scheduler: sched,
 		echo:      echo.New(),
 	}
-}
 
-func (a *API) Start() error {
 	a.echo.HideBanner = true
 	a.echo.HidePort = true
 
@@ -58,6 +56,15 @@ func (a *API) Start() error {
 	a.echo.GET("/nodes", a.listNodes)
 	a.echo.GET("/node/:id", a.getNode)
 
+	return a
+}
+
+// ServeHTTP implements http.Handler for testing.
+func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	a.echo.ServeHTTP(w, r)
+}
+
+func (a *API) Start() error {
 	addr := net.JoinHostPort(a.config.API.Host, strconv.Itoa(a.config.API.Port))
 
 	go func() {
