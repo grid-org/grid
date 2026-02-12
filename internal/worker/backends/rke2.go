@@ -1,11 +1,14 @@
 package backends
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
 
-	"github.com/bitfield/script"
 	"github.com/charmbracelet/log"
-	"github.com/grid-org/grid/internal/client"
 )
 
 type RKE2Backend struct{}
@@ -14,74 +17,71 @@ func init() {
 	registerBackend("rke2", &RKE2Backend{})
 }
 
-func (r *RKE2Backend) Run(job client.Job) error {
-	log.Info("Running rke2 backend", "action", job.Action, "payload", job.Payload)
+func (r *RKE2Backend) Actions() []string {
+	return []string{"download", "install", "uninstall", "start", "stop", "restart", "kill"}
+}
 
-	switch job.Action {
+func (r *RKE2Backend) Run(ctx context.Context, action string, params map[string]string) (*Result, error) {
+	log.Info("Running rke2 backend", "action", action, "params", params)
+
+	mode := params["mode"] // "server" or "agent"
+
+	switch action {
 	case "download":
-		// Download rke2 installer
-		_, err := script.Get("https://get.rke2.io").WriteFile("/tmp/rke2.sh")
-		if err != nil {
-			log.Error("Error downloading rke2 installer", "error", err)
-			return err
-		}
+		return r.download(ctx)
 	case "install":
-		// Install rke2
-		cmd := fmt.Sprintf("sh /tmp/rke2.sh %s", job.Payload)
-		out, err := script.Exec(cmd).String()
-		if err != nil {
-			log.Error("Error installing rke2", "error", err)
-			return err
-		}
-		log.Debug("Job output", "output", out)
+		flags := params["flags"]
+		return r.exec(ctx, "sh", "/tmp/rke2.sh", flags)
 	case "uninstall":
-		// Uninstall rke2
-		cmd := fmt.Sprintf("rke2-uninstall.sh %s", job.Payload)
-		out, err := script.Exec(cmd).String()
-		if err != nil {
-			log.Error("Error uninstalling rke2", "error", err)
-			return err
-		}
-		log.Debug("Job output", "output", out)
+		return r.exec(ctx, "rke2-uninstall.sh")
 	case "start":
-		// Enable rke2 service based on payload
-		cmd := fmt.Sprintf("systemctl enable --now --no-block rke2-%s", job.Payload)
-		out, err := script.Exec(cmd).String()
-		if err != nil {
-			log.Error("Error starting rke2", "error", err)
-			return err
+		if mode == "" {
+			return nil, fmt.Errorf("rke2 start: missing required param 'mode' (server|agent)")
 		}
-		log.Debug("Job output", "output", out)
+		return r.exec(ctx, "systemctl", "enable", "--now", "--no-block", fmt.Sprintf("rke2-%s", mode))
 	case "stop":
-		// Disable rke2 service based on payload
-		cmd := fmt.Sprintf("systemctl disable --now --no-block rke2-%s", job.Payload)
-		out, err := script.Exec(cmd).String()
-		if err != nil {
-			log.Error("Error stopping rke2", "error", err)
-			return err
+		if mode == "" {
+			return nil, fmt.Errorf("rke2 stop: missing required param 'mode' (server|agent)")
 		}
-		log.Debug("Job output", "output", out)
+		return r.exec(ctx, "systemctl", "disable", "--now", "--no-block", fmt.Sprintf("rke2-%s", mode))
 	case "restart":
-		// Restart rke2 service based on payload
-		cmd := fmt.Sprintf("systemctl restart rke2-%s", job.Payload)
-		out, err := script.Exec(cmd).String()
-		if err != nil {
-			log.Error("Error restarting rke2", "error", err)
-			return err
+		if mode == "" {
+			return nil, fmt.Errorf("rke2 restart: missing required param 'mode' (server|agent)")
 		}
-		log.Debug("Job output", "output", out)
+		return r.exec(ctx, "systemctl", "restart", fmt.Sprintf("rke2-%s", mode))
 	case "kill":
-		// Kill rke2 service with script
-		cmd := fmt.Sprintf("rke2-killall.sh %s", job.Payload)
-		out, err := script.Exec(cmd).String()
-		if err != nil {
-			log.Error("Error killing rke2", "error", err)
-			return err
-		}
-		log.Debug("Job output", "output", out)
+		return r.exec(ctx, "rke2-killall.sh")
 	default:
-		return fmt.Errorf("Unknown action for rke2 backend")
+		return nil, fmt.Errorf("rke2: unknown action %q", action)
+	}
+}
+
+func (r *RKE2Backend) download(ctx context.Context) (*Result, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://get.rke2.io", nil)
+	if err != nil {
+		return nil, fmt.Errorf("rke2 download: %w", err)
 	}
 
-	return nil
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("rke2 download: %w", err)
+	}
+	defer resp.Body.Close()
+
+	f, err := os.Create("/tmp/rke2.sh")
+	if err != nil {
+		return nil, fmt.Errorf("rke2 download: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		return nil, fmt.Errorf("rke2 download: %w", err)
+	}
+
+	return &Result{Output: "downloaded installer to /tmp/rke2.sh"}, nil
+}
+
+func (r *RKE2Backend) exec(ctx context.Context, name string, args ...string) (*Result, error) {
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	return &Result{Output: string(out)}, err
 }
