@@ -27,15 +27,17 @@ type CLI struct {
 // -- Job commands --
 
 type JobCmd struct {
-	Run  RunJobCmd  `cmd:"" help:"Submit a new job"`
-	Get  GetJobCmd  `cmd:"" help:"Get job status"`
-	List ListJobCmd `cmd:"" help:"List all jobs"`
+	Run    RunJobCmd    `cmd:"" help:"Submit a new job"`
+	Get    GetJobCmd    `cmd:"" help:"Get job status"`
+	List   ListJobCmd   `cmd:"" help:"List all jobs"`
+	Cancel CancelJobCmd `cmd:"" help:"Cancel a running or pending job"`
 }
 
 type RunJobCmd struct {
 	Target   string `name:"target" short:"t" help:"Target (all, group:<name>, node:<id>)" default:"all"`
 	File     string `name:"file" short:"f" help:"Job file (YAML)" optional:""`
 	Strategy string `name:"strategy" short:"s" help:"Failure strategy (fail-fast, continue)" default:"fail-fast"`
+	Timeout  string `name:"timeout" help:"Overall job timeout (e.g. 30m, 1h)" optional:""`
 	API      string `name:"api" short:"a" help:"Controller API address" default:"http://localhost:8765"`
 
 	// Inline single-task shorthand: gridc job run -t all apt install package=curl
@@ -45,7 +47,13 @@ type RunJobCmd struct {
 }
 
 type GetJobCmd struct {
-	ID string `arg:"" help:"Job ID"`
+	ID  string `arg:"" help:"Job ID"`
+	API string `name:"api" short:"a" help:"Controller API address" default:"http://localhost:8765"`
+}
+
+type CancelJobCmd struct {
+	ID  string `arg:"" help:"Job ID"`
+	API string `name:"api" short:"a" help:"Controller API address" default:"http://localhost:8765"`
 }
 
 type ListJobCmd struct{}
@@ -133,6 +141,9 @@ func (r *RunJobCmd) Run(cfg *config.Config, cl *client.Client) error {
 		"tasks":    tasks,
 		"strategy": r.Strategy,
 	}
+	if r.Timeout != "" {
+		reqBody["timeout"] = r.Timeout
+	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return fmt.Errorf("encoding request: %w", err)
@@ -161,6 +172,24 @@ func (r *RunJobCmd) Run(cfg *config.Config, cl *client.Client) error {
 
 	fmt.Printf("Job %s submitted (%d tasks, target=%s, strategy=%s)\n", job.ID, len(job.Tasks), r.Target, job.Strategy)
 	fmt.Printf("Expected nodes: %v\n", job.Expected)
+	return nil
+}
+
+// -- Job cancel --
+
+func (c *CancelJobCmd) Run(cfg *config.Config, cl *client.Client) error {
+	resp, err := http.Post(c.API+"/job/"+c.ID+"/cancel", "application/json", nil)
+	if err != nil {
+		return fmt.Errorf("cancelling job: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("cancel failed (%d): %s", resp.StatusCode, string(body))
+	}
+
+	fmt.Printf("Job %s cancelled\n", c.ID)
 	return nil
 }
 
