@@ -15,18 +15,39 @@ type Task struct {
 	Params  map[string]string `json:"params" yaml:"params"`
 }
 
+// Strategy controls how the scheduler handles task failures.
+type Strategy string
+
+const (
+	StrategyFailFast Strategy = "fail-fast" // stop on first failure (default)
+	StrategyContinue Strategy = "continue"  // exclude failed nodes, continue with remaining
+)
+
+// NodeResult stores the outcome of a single task on a single node.
+type NodeResult struct {
+	Status   ResultStatus `json:"status"`
+	Output   string       `json:"output,omitempty"`
+	Error    string       `json:"error,omitempty"`
+	Duration string       `json:"duration"`
+}
+
+// JobResults maps step index (as string) → nodeID → NodeResult.
+type JobResults map[string]map[string]NodeResult
+
 // Job is a sequence of tasks with a target selector.
 // Tasks execute in order: step N+1 does not begin until all targeted nodes
 // have reported results for step N.
 type Job struct {
-	ID        string    `json:"id"`
-	Target    Target    `json:"target"`
-	Tasks     []Task    `json:"tasks"`
-	Status    JobStatus `json:"status"`
-	Step      int       `json:"step"`      // current task index
-	Expected  []string  `json:"expected"`  // resolved node IDs
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        string     `json:"id"`
+	Target    Target     `json:"target"`
+	Tasks     []Task     `json:"tasks"`
+	Strategy  Strategy   `json:"strategy"`
+	Status    JobStatus  `json:"status"`
+	Step      int        `json:"step"`      // current task index
+	Expected  []string   `json:"expected"`  // resolved node IDs
+	Results   JobResults `json:"results,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
 
 // JobStatus represents the lifecycle state of a job.

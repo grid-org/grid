@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 
 	"github.com/alecthomas/kong"
@@ -30,8 +33,10 @@ type JobCmd struct {
 }
 
 type RunJobCmd struct {
-	Target string `name:"target" short:"t" help:"Target (all, group:<name>, node:<id>)" default:"all"`
-	File   string `name:"file" short:"f" help:"Job file (YAML)" optional:""`
+	Target   string `name:"target" short:"t" help:"Target (all, group:<name>, node:<id>)" default:"all"`
+	File     string `name:"file" short:"f" help:"Job file (YAML)" optional:""`
+	Strategy string `name:"strategy" short:"s" help:"Failure strategy (fail-fast, continue)" default:"fail-fast"`
+	API      string `name:"api" short:"a" help:"Controller API address" default:"http://localhost:8765"`
 
 	// Inline single-task shorthand: gridc job run -t all apt install package=curl
 	Backend string   `arg:"" help:"Backend name" optional:""`
@@ -122,30 +127,40 @@ func (r *RunJobCmd) Run(cfg *config.Config, cl *client.Client) error {
 		tasks = []models.Task{{Backend: r.Backend, Action: r.Action, Params: params}}
 	}
 
-	job := models.Job{
-		Target: target,
-		Tasks:  tasks,
-		Status: models.JobPending,
+	// Submit via HTTP API
+	reqBody := map[string]any{
+		"target":   target,
+		"tasks":    tasks,
+		"strategy": r.Strategy,
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("encoding request: %w", err)
 	}
 
-	data, _ := json.Marshal(job)
-	log.Info("Submitting job", "target", target, "tasks", len(tasks))
-	log.Debug("Job payload", "data", string(data))
+	resp, err := http.Post(r.API+"/job", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("submitting job to %s: %w", r.API, err)
+	}
+	defer resp.Body.Close()
 
-	// Publish directly via the client's NATS connection
-	// In the full flow, this would go through the HTTP API.
-	// For the CLI, we create the job and publish commands directly
-	// since the scheduler runs on the controller side.
-	// The CLI submits via HTTP POST /job to the controller API.
-	fmt.Printf("Job submitted with %d task(s) targeting %s", len(tasks), r.Target)
-	fmt.Println()
-	fmt.Println("Use the HTTP API to submit: POST http://<controller>:8765/job")
-	prettyJSON, _ := json.MarshalIndent(map[string]any{
-		"target": target,
-		"tasks":  tasks,
-	}, "", "  ")
-	fmt.Println(string(prettyJSON))
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading response: %w", err)
+	}
 
+	if resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("API error (%d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var job models.Job
+	if err := json.Unmarshal(respBody, &job); err != nil {
+		fmt.Println(string(respBody))
+		return nil
+	}
+
+	fmt.Printf("Job %s submitted (%d tasks, target=%s, strategy=%s)\n", job.ID, len(job.Tasks), r.Target, job.Strategy)
+	fmt.Printf("Expected nodes: %v\n", job.Expected)
 	return nil
 }
 

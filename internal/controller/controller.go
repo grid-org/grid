@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"time"
@@ -99,6 +100,14 @@ func (c *Controller) Start() error {
 	c.registry = registry.New(c.client)
 	c.scheduler = scheduler.New(c.client, c.registry)
 
+	// Start the scheduler's request-pulling loop
+	schedCtx, schedCancel := context.WithCancel(context.Background())
+	defer schedCancel()
+
+	if err := c.scheduler.Start(schedCtx); err != nil {
+		return fmt.Errorf("starting scheduler: %w", err)
+	}
+
 	log.Info("Controller started")
 
 	if c.config.API.Enabled {
@@ -109,6 +118,8 @@ func (c *Controller) Start() error {
 	}
 
 	common.WaitForSignal()
+
+	schedCancel()
 
 	if c.api != nil {
 		if err := c.api.Stop(); err != nil {
@@ -143,6 +154,19 @@ func (c *Controller) ensureInfrastructure() error {
 		Replicas:  c.config.NATS.JetStream.Replicas,
 	}); err != nil {
 		return fmt.Errorf("ensuring results stream: %w", err)
+	}
+
+	// Requests stream: API enqueues jobs, scheduler pulls them (work queue)
+	log.Debug("Ensuring requests stream")
+	if _, err := c.client.EnsureStream(jetstream.StreamConfig{
+		Name:      "requests",
+		Subjects:  []string{"request.>"},
+		Retention: jetstream.WorkQueuePolicy,
+		Discard:   jetstream.DiscardOld,
+		MaxAge:    1 * time.Hour,
+		Replicas:  c.config.NATS.JetStream.Replicas,
+	}); err != nil {
+		return fmt.Errorf("ensuring requests stream: %w", err)
 	}
 
 	// KV: cluster status

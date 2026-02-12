@@ -29,8 +29,9 @@ type API struct {
 
 // JobRequest is the HTTP request body for creating a job.
 type JobRequest struct {
-	Target models.Target `json:"target"`
-	Tasks  []models.Task `json:"tasks"`
+	Target   models.Target   `json:"target"`
+	Tasks    []models.Task   `json:"tasks"`
+	Strategy models.Strategy `json:"strategy,omitempty"`
 }
 
 func New(cfg *config.Config, c *client.Client, sched *scheduler.Scheduler) *API {
@@ -96,13 +97,19 @@ func (a *API) postJob(ctx echo.Context) error {
 		req.Target.Scope = "all"
 	}
 
-	job := models.Job{
-		ID:     generateID(),
-		Target: req.Target,
-		Tasks:  req.Tasks,
+	strategy := req.Strategy
+	if strategy == "" {
+		strategy = models.StrategyFailFast
 	}
 
-	job, err := a.scheduler.Submit(job)
+	job := models.Job{
+		ID:       generateID(),
+		Target:   req.Target,
+		Tasks:    req.Tasks,
+		Strategy: strategy,
+	}
+
+	job, err := a.scheduler.Enqueue(job)
 	if err != nil {
 		return ctx.JSON(http.StatusInternalServerError, J{"error": err.Error()})
 	}
