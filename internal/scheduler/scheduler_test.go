@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/grid-org/grid/internal/config"
 	"github.com/grid-org/grid/internal/models"
 	"github.com/grid-org/grid/internal/registry"
 	"github.com/grid-org/grid/internal/scheduler"
@@ -181,7 +182,7 @@ func setupScheduler(t *testing.T, env *testutil.TestEnv, nodeIDs []string, group
 		env.RegisterNodes(t, testutil.OnlineNode(id, groups...))
 	}
 	reg := registry.New(env.Client)
-	return scheduler.New(env.Client, reg)
+	return scheduler.New(env.Client, reg, config.SchedulerConfig{})
 }
 
 // --- Tests ---
@@ -358,9 +359,14 @@ func TestExecute_FailFast(t *testing.T) {
 	if got.Status != models.JobFailed {
 		t.Errorf("Status = %q, want failed", got.Status)
 	}
-	// Step 1 should not have results
-	if len(got.Results["1"]) > 0 {
-		t.Errorf("step 1 should not have results, has %d", len(got.Results["1"]))
+	// Step 1 should have skipped results (fail-fast now records skips)
+	if len(got.Results["1"]) != 2 {
+		t.Errorf("step 1 should have 2 skipped results, has %d", len(got.Results["1"]))
+	}
+	for nodeID, nr := range got.Results["1"] {
+		if nr.Status != models.ResultSkipped {
+			t.Errorf("step 1 node %s status = %q, want skipped", nodeID, nr.Status)
+		}
 	}
 }
 
@@ -633,4 +639,508 @@ func TestExecute_Retry(t *testing.T) {
 	if nr.Attempts < 2 {
 		t.Errorf("Attempts = %d, want >= 2", nr.Attempts)
 	}
+}
+
+// --- Conditional Execution Tests ---
+
+func TestShouldExecute(t *testing.T) {
+	tests := []struct {
+		name           string
+		condition      models.Condition
+		previousFailed bool
+		want           bool
+	}{
+		{"empty_no_failure", "", false, true},
+		{"empty_with_failure", "", true, true},
+		{"always_no_failure", models.ConditionAlways, false, true},
+		{"always_with_failure", models.ConditionAlways, true, true},
+		{"on_success_no_failure", models.ConditionOnSuccess, false, true},
+		{"on_success_with_failure", models.ConditionOnSuccess, true, false},
+		{"on_failure_no_failure", models.ConditionOnFailure, false, false},
+		{"on_failure_with_failure", models.ConditionOnFailure, true, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := scheduler.ShouldExecute(tt.condition, tt.previousFailed)
+			if got != tt.want {
+				t.Errorf("ShouldExecute(%q, %v) = %v, want %v", tt.condition, tt.previousFailed, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConditionOnSuccess_SkipsOnFailure(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	// Two nodes: n1 succeeds, n2 fails → n2 excluded, stepFailed=true
+	nodes := []string{"n1", "n2"}
+	sched := setupScheduler(t, env, nodes, "web")
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// n1 succeeds, n2 fails on every step
+	stopWorkers := startMixedMockWorkers(t, env, []string{"n1"}, []string{"n2"})
+	defer stopWorkers()
+
+	job := models.Job{
+		ID:       "cond-onsuccess-skip",
+		Target:   models.Target{Scope: "all"},
+		Strategy: models.StrategyContinue,
+		Tasks: []models.Task{
+			{Backend: "test", Action: "succeed"},                                      // step 0: n1 ok, n2 fails → n2 excluded
+			{Backend: "test", Action: "succeed", Condition: models.ConditionOnSuccess}, // step 1: should be skipped (stepFailed)
+			{Backend: "test", Action: "succeed", Condition: models.ConditionAlways},    // step 2: should run on n1
+		},
+	}
+
+	_, err := sched.Enqueue(job)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		j, _ := env.Client.GetJob("cond-onsuccess-skip")
+		return j.Status == models.JobCompleted || j.Status == models.JobFailed
+	}, "job should finish")
+
+	got, _ := env.Client.GetJob("cond-onsuccess-skip")
+
+	// Step 1 should be skipped for remaining active node (n1)
+	if nr, ok := got.Results["1"]["n1"]; !ok {
+		t.Error("step 1 should have a result for n1")
+	} else if nr.Status != models.ResultSkipped {
+		t.Errorf("step 1 n1 status = %q, want skipped", nr.Status)
+	}
+
+	// Step 2 (always) should have run on n1
+	if nr, ok := got.Results["2"]["n1"]; !ok {
+		t.Error("step 2 should have a result for n1")
+	} else if nr.Status != models.ResultSuccess {
+		t.Errorf("step 2 n1 status = %q, want success", nr.Status)
+	}
+}
+
+func TestConditionOnFailure_RunsCleanup(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	sched := setupScheduler(t, env, nodes, "web")
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Step-aware: step 0 fails, step 1 (cleanup) succeeds
+	// Use fail-fast so the node stays in activeNodes and on_failure can run
+	stopWorkers := startStepAwareMockWorkers(t, env, nodes, map[int]mockWorkerBehavior{
+		0: behaviorFail,
+		1: behaviorSucceed,
+	})
+	defer stopWorkers()
+
+	job := models.Job{
+		ID:       "cond-onfailure-runs",
+		Target:   models.Target{Scope: "all"},
+		Strategy: models.StrategyFailFast,
+		Tasks: []models.Task{
+			{Backend: "test", Action: "fail"},                                         // step 0: fails → fail-fast triggered
+			{Backend: "test", Action: "succeed", Condition: models.ConditionOnFailure}, // step 1: should run (on_failure cleanup)
+		},
+	}
+
+	_, err := sched.Enqueue(job)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		j, _ := env.Client.GetJob("cond-onfailure-runs")
+		return j.Status == models.JobCompleted || j.Status == models.JobFailed
+	}, "job should finish")
+
+	got, _ := env.Client.GetJob("cond-onfailure-runs")
+	if got.Status != models.JobFailed {
+		t.Errorf("Status = %q, want failed", got.Status)
+	}
+
+	// Step 1 (on_failure cleanup) should have run and succeeded
+	if nr, ok := got.Results["1"]["n1"]; !ok {
+		t.Error("step 1 should have a result for n1")
+	} else if nr.Status != models.ResultSuccess {
+		t.Errorf("step 1 n1 status = %q, want success", nr.Status)
+	}
+}
+
+func TestConditionOnFailure_SkippedOnSuccess(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	sched := setupScheduler(t, env, nodes, "web")
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	stopWorkers := startMockWorkers(t, env, nodes, behaviorSucceed)
+	defer stopWorkers()
+
+	job := models.Job{
+		ID:     "cond-onfailure-skip",
+		Target: models.Target{Scope: "all"},
+		Tasks: []models.Task{
+			{Backend: "test", Action: "succeed"},                                      // step 0: succeeds
+			{Backend: "test", Action: "succeed", Condition: models.ConditionOnFailure}, // step 1: should be skipped
+		},
+	}
+
+	_, err := sched.Enqueue(job)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		j, _ := env.Client.GetJob("cond-onfailure-skip")
+		return j.Status == models.JobCompleted || j.Status == models.JobFailed
+	}, "job should finish")
+
+	got, _ := env.Client.GetJob("cond-onfailure-skip")
+	if got.Status != models.JobCompleted {
+		t.Errorf("Status = %q, want completed", got.Status)
+	}
+
+	// Step 1 (on_failure) should be skipped since step 0 succeeded
+	if nr, ok := got.Results["1"]["n1"]; !ok {
+		t.Error("step 1 should have a result for n1")
+	} else if nr.Status != models.ResultSkipped {
+		t.Errorf("step 1 n1 status = %q, want skipped", nr.Status)
+	}
+}
+
+func TestFailFast_StillRunsOnFailureTasks(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	sched := setupScheduler(t, env, nodes, "web")
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Step-aware: step 0 fails, step 2 (the on_failure cleanup) succeeds
+	stopWorkers := startStepAwareMockWorkers(t, env, nodes, map[int]mockWorkerBehavior{
+		0: behaviorFail,
+		1: behaviorSucceed, // won't be used (skipped)
+		2: behaviorSucceed,
+	})
+	defer stopWorkers()
+
+	job := models.Job{
+		ID:       "failfast-onfailure",
+		Target:   models.Target{Scope: "all"},
+		Strategy: models.StrategyFailFast,
+		Tasks: []models.Task{
+			{Backend: "test", Action: "fail"},                                         // step 0: fails → fail-fast triggers
+			{Backend: "test", Action: "succeed"},                                      // step 1: should be skipped (fail-fast, no condition)
+			{Backend: "test", Action: "succeed", Condition: models.ConditionOnFailure}, // step 2: should run (on_failure)
+		},
+	}
+
+	_, err := sched.Enqueue(job)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		j, _ := env.Client.GetJob("failfast-onfailure")
+		return j.Status == models.JobFailed
+	}, "job should fail")
+
+	got, _ := env.Client.GetJob("failfast-onfailure")
+	if got.Status != models.JobFailed {
+		t.Errorf("Status = %q, want failed", got.Status)
+	}
+
+	// Step 1 should be skipped
+	if nr, ok := got.Results["1"]["n1"]; !ok {
+		t.Error("step 1 should have a result for n1")
+	} else if nr.Status != models.ResultSkipped {
+		t.Errorf("step 1 n1 status = %q, want skipped", nr.Status)
+	}
+
+	// Step 2 (on_failure) should have run
+	if nr, ok := got.Results["2"]["n1"]; !ok {
+		t.Error("step 2 should have a result for n1")
+	} else if nr.Status != models.ResultSuccess {
+		t.Errorf("step 2 n1 status = %q, want success", nr.Status)
+	}
+}
+
+func TestConditionDefault_IsAlways(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	sched := setupScheduler(t, env, nodes, "web")
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	stopWorkers := startMockWorkers(t, env, nodes, behaviorSucceed)
+	defer stopWorkers()
+
+	// Tasks with no condition set — should all run
+	job := models.Job{
+		ID:     "cond-default",
+		Target: models.Target{Scope: "all"},
+		Tasks: []models.Task{
+			{Backend: "test", Action: "succeed"},
+			{Backend: "test", Action: "succeed"},
+		},
+	}
+
+	_, err := sched.Enqueue(job)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		j, _ := env.Client.GetJob("cond-default")
+		return j.Status == models.JobCompleted
+	}, "job should complete")
+
+	got, _ := env.Client.GetJob("cond-default")
+	if got.Status != models.JobCompleted {
+		t.Errorf("Status = %q, want completed", got.Status)
+	}
+	if len(got.Results) != 2 {
+		t.Errorf("Results has %d steps, want 2", len(got.Results))
+	}
+}
+
+// --- Queuing & Concurrency Tests ---
+
+func TestQueueFull_RejectsWhenPendingExceeded(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	for _, id := range nodes {
+		env.RegisterNodes(t, testutil.OnlineNode(id, "web"))
+	}
+	reg := registry.New(env.Client)
+
+	// Very small pending limit — no scheduler Start() so jobs stay pending
+	sched := scheduler.New(env.Client, reg, config.SchedulerConfig{
+		MaxConcurrent: 2,
+		MaxPending:    3,
+	})
+
+	// Fill the pending queue
+	for i := 0; i < 3; i++ {
+		job := models.Job{
+			ID:     fmt.Sprintf("queue-fill-%d", i),
+			Target: models.Target{Scope: "all"},
+			Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+		}
+		_, err := sched.Enqueue(job)
+		if err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+
+	// Next enqueue should return ErrQueueFull
+	job := models.Job{
+		ID:     "queue-overflow",
+		Target: models.Target{Scope: "all"},
+		Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+	}
+	_, err := sched.Enqueue(job)
+	if err != scheduler.ErrQueueFull {
+		t.Errorf("expected ErrQueueFull, got: %v", err)
+	}
+}
+
+func TestMaxConcurrent_LimitsParallelJobs(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	for _, id := range nodes {
+		env.RegisterNodes(t, testutil.OnlineNode(id, "web"))
+	}
+	reg := registry.New(env.Client)
+
+	maxConcurrent := 2
+	sched := scheduler.New(env.Client, reg, config.SchedulerConfig{
+		MaxConcurrent: maxConcurrent,
+		MaxPending:    100,
+	})
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Use slow workers so jobs overlap
+	stopWorkers := startMockWorkers(t, env, nodes, behaviorSlow)
+	defer stopWorkers()
+
+	totalJobs := 4
+	for i := 0; i < totalJobs; i++ {
+		job := models.Job{
+			ID:     fmt.Sprintf("concurrent-%d", i),
+			Target: models.Target{Scope: "all"},
+			Tasks:  []models.Task{{Backend: "test", Action: "sleep", Params: map[string]string{"duration": "2s"}}},
+		}
+		_, err := sched.Enqueue(job)
+		if err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+
+	// Wait a bit for some jobs to be picked up, then count how many are running
+	time.Sleep(1 * time.Second)
+	runningCount := 0
+	for i := 0; i < totalJobs; i++ {
+		j, err := env.Client.GetJob(fmt.Sprintf("concurrent-%d", i))
+		if err != nil {
+			continue
+		}
+		if j.Status == models.JobRunning {
+			runningCount++
+		}
+	}
+
+	if runningCount > maxConcurrent {
+		t.Errorf("running count = %d, want <= %d", runningCount, maxConcurrent)
+	}
+}
+
+func TestConcurrentJobs_CompleteIndependently(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	for _, id := range nodes {
+		env.RegisterNodes(t, testutil.OnlineNode(id, "web"))
+	}
+	reg := registry.New(env.Client)
+
+	sched := scheduler.New(env.Client, reg, config.SchedulerConfig{
+		MaxConcurrent: 3,
+		MaxPending:    100,
+	})
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	stopWorkers := startMockWorkers(t, env, nodes, behaviorSucceed)
+	defer stopWorkers()
+
+	totalJobs := 3
+	for i := 0; i < totalJobs; i++ {
+		job := models.Job{
+			ID:     fmt.Sprintf("indep-%d", i),
+			Target: models.Target{Scope: "all"},
+			Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+		}
+		_, err := sched.Enqueue(job)
+		if err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+
+	// All jobs should complete
+	for i := 0; i < totalJobs; i++ {
+		id := fmt.Sprintf("indep-%d", i)
+		testutil.WaitFor(t, 15*time.Second, func() bool {
+			j, _ := env.Client.GetJob(id)
+			return j.Status == models.JobCompleted
+		}, fmt.Sprintf("job %s should complete", id))
+	}
+
+	for i := 0; i < totalJobs; i++ {
+		got, _ := env.Client.GetJob(fmt.Sprintf("indep-%d", i))
+		if got.Status != models.JobCompleted {
+			t.Errorf("job indep-%d status = %q, want completed", i, got.Status)
+		}
+	}
+}
+
+// startStepAwareMockWorkers creates workers that behave differently per task step.
+func startStepAwareMockWorkers(t *testing.T, env *testutil.TestEnv, nodeIDs []string, stepBehavior map[int]mockWorkerBehavior) context.CancelFunc {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	stream, err := env.Client.GetStream("commands")
+	if err != nil {
+		t.Fatalf("getting commands stream: %v", err)
+	}
+
+	for _, id := range nodeIDs {
+		nodeID := id
+		consumerName := fmt.Sprintf("mock-step-%s", nodeID)
+		consumer, err := env.Client.EnsureConsumer(stream, jetstream.ConsumerConfig{
+			Durable:        consumerName,
+			FilterSubjects: []string{"cmd.>"},
+			DeliverPolicy:  jetstream.DeliverNewPolicy,
+			AckPolicy:      jetstream.AckExplicitPolicy,
+		})
+		if err != nil {
+			t.Fatalf("creating mock consumer for %s: %v", nodeID, err)
+		}
+
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				msgs, err := consumer.Fetch(1, jetstream.FetchMaxWait(500*time.Millisecond))
+				if err != nil {
+					continue
+				}
+
+				for msg := range msgs.Messages() {
+					jobID := msg.Headers().Get("job-id")
+					taskIndex, _ := strconv.Atoi(msg.Headers().Get("task-index"))
+
+					behavior := behaviorSucceed
+					if b, ok := stepBehavior[taskIndex]; ok {
+						behavior = b
+					}
+
+					status := models.ResultSuccess
+					errMsg := ""
+					if behavior == behaviorFail {
+						status = models.ResultFailed
+						errMsg = "mock failure"
+					}
+
+					result := models.TaskResult{
+						JobID:     jobID,
+						TaskIndex: taskIndex,
+						NodeID:    nodeID,
+						Status:    status,
+						Output:    "mock output",
+						Error:     errMsg,
+						Duration:  50 * time.Millisecond,
+						Timestamp: time.Now(),
+					}
+					env.Client.PublishResult(result)
+					msg.Ack()
+				}
+			}
+		}()
+	}
+
+	return cancel
 }

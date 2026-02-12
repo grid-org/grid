@@ -22,7 +22,7 @@ func setupAPI(t *testing.T) (*testutil.TestEnv, *api.API, *scheduler.Scheduler) 
 	env.RegisterNodes(t, testutil.OnlineNode("test-node", "web"))
 
 	reg := registry.New(env.Client)
-	sched := scheduler.New(env.Client, reg)
+	sched := scheduler.New(env.Client, reg, env.Config.Scheduler)
 	a := api.New(env.Config, env.Client, sched)
 
 	return env, a, sched
@@ -246,6 +246,42 @@ func TestGetStatus(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&resp)
 	if resp["status"] != "active" {
 		t.Errorf("status = %q, want active", resp["status"])
+	}
+}
+
+func TestPostJob_429_WhenQueueFull(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	env.RegisterNodes(t, testutil.OnlineNode("test-node", "web"))
+
+	// Tiny pending limit to trigger queue full quickly
+	env.Config.Scheduler.MaxPending = 2
+	env.Config.Scheduler.MaxConcurrent = 1
+
+	reg := registry.New(env.Client)
+	sched := scheduler.New(env.Client, reg, env.Config.Scheduler)
+	a := api.New(env.Config, env.Client, sched)
+
+	body := `{"target":{"scope":"all"},"tasks":[{"backend":"test","action":"succeed"}]}`
+
+	// Fill the pending queue
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest("POST", "/job", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		a.ServeHTTP(rec, req)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("fill request %d: status = %d, want %d", i, rec.Code, http.StatusAccepted)
+		}
+	}
+
+	// Next request should get 429
+	req := httptest.NewRequest("POST", "/job", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	a.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want %d; body: %s", rec.Code, http.StatusTooManyRequests, rec.Body.String())
 	}
 }
 

@@ -207,7 +207,7 @@ func setupCluster(t *testing.T) *testCluster {
 
 	env := testutil.NewTestEnv(t)
 	reg := registry.New(env.Client)
-	sched := scheduler.New(env.Client, reg)
+	sched := scheduler.New(env.Client, reg, env.Config.Scheduler)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -430,9 +430,11 @@ func TestE2E_FailFast(t *testing.T) {
 	if got.Status != models.JobFailed {
 		t.Errorf("Status = %q, want failed", got.Status)
 	}
-	// Step 1 should not have results (stopped after step 0 failure)
-	if len(got.Results["1"]) > 0 {
-		t.Errorf("step 1 should not have results, has %d", len(got.Results["1"]))
+	// Step 1 should have skipped results (fail-fast now records skips)
+	for nodeID, nr := range got.Results["1"] {
+		if nr.Status != models.ResultSkipped {
+			t.Errorf("step 1 node %s status = %q, want skipped", nodeID, nr.Status)
+		}
 	}
 }
 

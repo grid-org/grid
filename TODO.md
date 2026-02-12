@@ -1,9 +1,9 @@
 # TODO
 
-## Up Next
+## Phase 2 Complete
 
-- [ ] Conditional task execution (only-if, on-failure)
-- [ ] Job queuing and admission control
+- [x] Conditional task execution (always, on_success, on_failure)
+- [x] Job queuing and admission control (max_concurrent, max_pending, HTTP 429)
 
 ## Phase 3: Production Hardening
 

@@ -3,13 +3,16 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/log"
 	"github.com/grid-org/grid/internal/client"
+	"github.com/grid-org/grid/internal/config"
 	"github.com/grid-org/grid/internal/models"
 	"github.com/grid-org/grid/internal/registry"
 	"github.com/nats-io/nats.go"
@@ -17,6 +20,9 @@ import (
 )
 
 const DefaultTaskTimeout = 5 * time.Minute
+
+// ErrQueueFull is returned by Enqueue when the pending queue is at capacity.
+var ErrQueueFull = errors.New("job queue is full")
 
 // Scheduler orchestrates job execution: validates, dispatches commands,
 // collects results, and advances through multi-step jobs.
@@ -26,17 +32,30 @@ type Scheduler struct {
 
 	mu      sync.Mutex
 	running map[string]context.CancelFunc // active job ID → cancel
+
+	sem        chan struct{} // buffered semaphore limiting concurrent jobs
+	pending    atomic.Int64  // count of enqueued but not-yet-running jobs
+	maxPending int
 }
 
-func New(c *client.Client, reg *registry.Registry) *Scheduler {
+func New(c *client.Client, reg *registry.Registry, cfg config.SchedulerConfig) *Scheduler {
+	if cfg.MaxConcurrent <= 0 {
+		cfg.MaxConcurrent = 5
+	}
+	if cfg.MaxPending <= 0 {
+		cfg.MaxPending = 100
+	}
 	return &Scheduler{
-		client:   c,
-		registry: reg,
-		running:  make(map[string]context.CancelFunc),
+		client:     c,
+		registry:   reg,
+		running:    make(map[string]context.CancelFunc),
+		sem:        make(chan struct{}, cfg.MaxConcurrent),
+		maxPending: cfg.MaxPending,
 	}
 }
 
 // Start begins pulling jobs from the requests stream (WorkQueue consumer).
+// Jobs execute concurrently up to the configured MaxConcurrent limit.
 func (s *Scheduler) Start(ctx context.Context) error {
 	stream, err := s.client.GetStream("requests")
 	if err != nil {
@@ -54,17 +73,34 @@ func (s *Scheduler) Start(ctx context.Context) error {
 
 	go func() {
 		for {
+			// Acquire a concurrency slot (blocks if MaxConcurrent goroutines are active)
 			select {
+			case s.sem <- struct{}{}:
 			case <-ctx.Done():
 				return
-			default:
 			}
+
+			// Fetch the next job from the work queue
 			msgs, err := consumer.Fetch(1, jetstream.FetchMaxWait(2*time.Second))
 			if err != nil {
+				<-s.sem // release slot
+				if ctx.Err() != nil {
+					return
+				}
 				continue
 			}
+
+			gotMsg := false
 			for msg := range msgs.Messages() {
-				s.handleRequest(ctx, msg)
+				gotMsg = true
+				s.pending.Add(-1) // no longer pending, now running
+				go func(m jetstream.Msg) {
+					defer func() { <-s.sem }() // release slot when done
+					s.handleRequest(ctx, m)
+				}(msg)
+			}
+			if !gotMsg {
+				<-s.sem // release slot if no message received
 			}
 		}
 	}()
@@ -74,8 +110,13 @@ func (s *Scheduler) Start(ctx context.Context) error {
 }
 
 // Enqueue validates, resolves targets, stores the job, and publishes to the
-// requests stream. Returns the job with populated fields.
+// requests stream. Returns ErrQueueFull if the pending queue is at capacity.
 func (s *Scheduler) Enqueue(job models.Job) (models.Job, error) {
+	// Admission control: reject if pending queue is full
+	if s.pending.Load() >= int64(s.maxPending) {
+		return job, ErrQueueFull
+	}
+
 	// Resolve targets
 	nodes, err := s.registry.Resolve(job.Target)
 	if err != nil {
@@ -102,7 +143,9 @@ func (s *Scheduler) Enqueue(job models.Job) (models.Job, error) {
 	if _, err := s.client.Publish(&nats.Msg{Subject: subject, Data: data}); err != nil {
 		return job, fmt.Errorf("publishing request: %w", err)
 	}
-	log.Info("Job enqueued", "id", job.ID)
+
+	s.pending.Add(1)
+	log.Info("Job enqueued", "id", job.ID, "pending", s.pending.Load())
 
 	return job, nil
 }
@@ -173,6 +216,35 @@ func (s *Scheduler) handleRequest(ctx context.Context, msg jetstream.Msg) {
 	cancel()
 }
 
+// ShouldExecute determines whether a task should run based on its condition
+// and whether any previous step has failed.
+func ShouldExecute(condition models.Condition, previousFailed bool) bool {
+	switch condition {
+	case models.ConditionOnSuccess:
+		return !previousFailed
+	case models.ConditionOnFailure:
+		return previousFailed
+	default: // "" or "always"
+		return true
+	}
+}
+
+// storeSkippedResults writes synthetic "skipped" results for all active nodes at a step.
+func (s *Scheduler) storeSkippedResults(job *models.Job, step int, activeNodes []string) {
+	stepKey := strconv.Itoa(step)
+	if job.Results == nil {
+		job.Results = make(models.JobResults)
+	}
+	job.Results[stepKey] = make(map[string]models.NodeResult)
+	for _, nodeID := range activeNodes {
+		job.Results[stepKey][nodeID] = models.NodeResult{
+			Status:   models.ResultSkipped,
+			Duration: "0s",
+		}
+	}
+	s.client.UpdateJob(*job)
+}
+
 func (s *Scheduler) execute(ctx context.Context, job models.Job) {
 	log.Info("Executing job", "id", job.ID, "tasks", len(job.Tasks), "nodes", len(job.Expected), "strategy", job.Strategy)
 
@@ -185,6 +257,11 @@ func (s *Scheduler) execute(ctx context.Context, job models.Job) {
 	// Track active nodes (for continue strategy, failed nodes are excluded)
 	activeNodes := make([]string, len(job.Expected))
 	copy(activeNodes, job.Expected)
+
+	// Track whether any prior step has failed (for conditional execution)
+	stepFailed := false
+	// Track whether fail-fast has been triggered (allows on_failure tasks to still run)
+	failFastTriggered := false
 
 	for i, task := range job.Tasks {
 		// Check for cancellation
@@ -200,6 +277,20 @@ func (s *Scheduler) execute(ctx context.Context, job models.Job) {
 			job.Status = models.JobFailed
 			s.client.UpdateJob(job)
 			return
+		}
+
+		// Evaluate task condition
+		if failFastTriggered {
+			// After fail-fast, only on_failure tasks may run
+			if task.Condition != models.ConditionOnFailure {
+				log.Info("Skipping task (fail-fast triggered)", "job", job.ID, "step", i, "condition", task.Condition)
+				s.storeSkippedResults(&job, i, activeNodes)
+				continue
+			}
+		} else if !ShouldExecute(task.Condition, stepFailed) {
+			log.Info("Skipping task (condition not met)", "job", job.ID, "step", i, "condition", task.Condition)
+			s.storeSkippedResults(&job, i, activeNodes)
+			continue
 		}
 
 		job.Step = i
@@ -300,6 +391,9 @@ func (s *Scheduler) execute(ctx context.Context, job models.Job) {
 		log.Info("Task step complete", "job", job.ID, "step", i, "results", len(results))
 
 		if lastErr != nil {
+			// Mark that a step has failed (for conditional execution)
+			stepFailed = true
+
 			// Apply failure strategy on final failure
 			for _, r := range results {
 				if r.Status == models.ResultFailed {
@@ -312,10 +406,8 @@ func (s *Scheduler) execute(ctx context.Context, job models.Job) {
 						}
 						log.Info("Node failed, continuing", "job", job.ID, "node", r.NodeID)
 					} else {
-						log.Info("Node failed, stopping", "job", job.ID, "node", r.NodeID)
-						job.Status = models.JobFailed
-						s.client.UpdateJob(job)
-						return
+						log.Info("Node failed, fail-fast triggered", "job", job.ID, "node", r.NodeID)
+						failFastTriggered = true
 					}
 				}
 			}
@@ -328,9 +420,13 @@ func (s *Scheduler) execute(ctx context.Context, job models.Job) {
 		}
 	}
 
-	job.Status = models.JobCompleted
+	if failFastTriggered {
+		job.Status = models.JobFailed
+	} else {
+		job.Status = models.JobCompleted
+	}
 	if err := s.client.UpdateJob(job); err != nil {
-		log.Error("Failed to mark job completed", "id", job.ID, "error", err)
+		log.Error("Failed to mark job done", "id", job.ID, "error", err)
 	}
 	log.Info("Job done", "id", job.ID, "status", job.Status)
 }
