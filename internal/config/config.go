@@ -54,9 +54,14 @@ type NATSConfig struct {
 	Server    ServerConfig    `yaml:"server"`
 }
 
+type WorkerConfig struct {
+	Groups []string `yaml:"groups"`
+}
+
 type Config struct {
-	API  APIConfig  `yaml:"api"`
-	NATS NATSConfig `yaml:"nats"`
+	API    APIConfig    `yaml:"api"`
+	NATS   NATSConfig   `yaml:"nats"`
+	Worker WorkerConfig `yaml:"worker"`
 }
 
 func LoadConfig(configFile string) *Config {

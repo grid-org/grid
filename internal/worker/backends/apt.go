@@ -1,10 +1,11 @@
 package backends
 
 import (
+	"context"
 	"fmt"
-	"github.com/bitfield/script"
+	"os/exec"
+
 	"github.com/charmbracelet/log"
-	"github.com/grid-org/grid/internal/client"
 )
 
 type APTBackend struct{}
@@ -13,22 +14,35 @@ func init() {
 	registerBackend("apt", &APTBackend{})
 }
 
-func (a *APTBackend) Run(job client.Job) error {
-	log.Info("Running apt backend", "action", job.Action, "payload", job.Payload)
+func (a *APTBackend) Actions() []string {
+	return []string{"install", "remove", "update", "upgrade"}
+}
 
-	// Check if the action is "install"
-	switch job.Action {
+func (a *APTBackend) Run(ctx context.Context, action string, params map[string]string) (*Result, error) {
+	log.Info("Running apt backend", "action", action, "params", params)
+
+	var cmd *exec.Cmd
+	switch action {
 	case "install":
-		// Install the package
-		cmd := fmt.Sprintf("apt install -y %s", job.Payload)
-		err := script.Exec(cmd).Wait()
-		if err != nil {
-			log.Error("Error installing package", "error", err)
-			return err
+		pkg := params["package"]
+		if pkg == "" {
+			return nil, fmt.Errorf("apt install: missing required param 'package'")
 		}
+		cmd = exec.CommandContext(ctx, "apt-get", "install", "-y", pkg)
+	case "remove":
+		pkg := params["package"]
+		if pkg == "" {
+			return nil, fmt.Errorf("apt remove: missing required param 'package'")
+		}
+		cmd = exec.CommandContext(ctx, "apt-get", "remove", "-y", pkg)
+	case "update":
+		cmd = exec.CommandContext(ctx, "apt-get", "update")
+	case "upgrade":
+		cmd = exec.CommandContext(ctx, "apt-get", "upgrade", "-y")
 	default:
-		return fmt.Errorf("Unknown action for apt backend")
+		return nil, fmt.Errorf("apt: unknown action %q", action)
 	}
 
-	return nil
+	out, err := cmd.CombinedOutput()
+	return &Result{Output: string(out)}, err
 }
