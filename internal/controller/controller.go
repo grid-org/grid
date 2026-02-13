@@ -141,6 +141,7 @@ func (c *Controller) Start() error {
 
 	if c.config.API.Enabled {
 		c.api = api.New(c.config, c.client, c.scheduler)
+		c.api.SetNATSServer(c.server)
 		if err = c.api.Start(); err != nil {
 			return fmt.Errorf("starting API server: %w", err)
 		}

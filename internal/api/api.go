@@ -17,15 +17,23 @@ import (
 
 	"github.com/charmbracelet/log"
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	natsserver "github.com/nats-io/nats-server/v2/server"
 )
 
 type J map[string]any
 
 type API struct {
-	config    *config.Config
-	client    *client.Client
-	scheduler *scheduler.Scheduler
-	echo      *echo.Echo
+	config     *config.Config
+	client     *client.Client
+	scheduler  *scheduler.Scheduler
+	echo       *echo.Echo
+	natsServer *natsserver.Server
+}
+
+// SetNATSServer provides the embedded NATS server for monitoring endpoints.
+func (a *API) SetNATSServer(s *natsserver.Server) {
+	a.natsServer = s
 }
 
 // JobRequest is the HTTP request body for creating a job.
@@ -47,7 +55,9 @@ func New(cfg *config.Config, c *client.Client, sched *scheduler.Scheduler) *API 
 	a.echo.HideBanner = true
 	a.echo.HidePort = true
 
+	a.echo.Use(middleware.CORS())
 	a.echo.Use(echoLogger())
+	a.echo.Static("/", "web")
 
 	a.echo.GET("/status", a.getStatus)
 	a.echo.POST("/job", a.postJob)
@@ -57,6 +67,7 @@ func New(cfg *config.Config, c *client.Client, sched *scheduler.Scheduler) *API 
 	a.echo.GET("/nodes", a.listNodes)
 	a.echo.GET("/node/:id", a.getNode)
 	a.echo.GET("/controllers", a.listControllers)
+	a.echo.GET("/nats", a.getNATSInfo)
 
 	return a
 }
@@ -198,6 +209,37 @@ func (a *API) listControllers(ctx echo.Context) error {
 	}
 
 	return ctx.JSON(http.StatusOK, controllers)
+}
+
+func (a *API) getNATSInfo(ctx echo.Context) error {
+	if a.natsServer == nil {
+		return ctx.JSON(http.StatusServiceUnavailable, J{"error": "NATS server not available"})
+	}
+
+	varz, err := a.natsServer.Varz(&natsserver.VarzOptions{})
+	if err != nil {
+		return ctx.JSON(http.StatusInternalServerError, J{"error": err.Error()})
+	}
+
+	return ctx.JSON(http.StatusOK, J{
+		"server_id":   varz.ID,
+		"server_name": varz.Name,
+		"version":     varz.Version,
+		"uptime":      varz.Uptime,
+		"mem":         varz.Mem,
+		"cpu":         varz.CPU,
+		"cores":       varz.Cores,
+		"connections":  varz.Connections,
+		"total_connections": varz.TotalConnections,
+		"routes":      varz.Routes,
+		"subscriptions": varz.Subscriptions,
+		"slow_consumers": varz.SlowConsumers,
+		"in_msgs":     varz.InMsgs,
+		"out_msgs":    varz.OutMsgs,
+		"in_bytes":    varz.InBytes,
+		"out_bytes":   varz.OutBytes,
+		"jetstream":   varz.JetStream,
+	})
 }
 
 func generateID() string {
