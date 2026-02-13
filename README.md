@@ -12,36 +12,47 @@
 - **Conditional execution** — `on_success`, `on_failure`, and `always` conditions for rollback/cleanup
 - **Per-task retries** with exponential backoff
 - **Per-task and per-job timeouts**
-- **Job cancellation** via API
+- **Job cancellation** via API (works across controllers)
 - **Job queuing** with configurable concurrency and pending limits
+- **Multi-controller HA** — multiple controllers share a NATS cluster, compete for jobs via CAS, and recover each other's orphaned work
+- **Stale job recovery** — dead controller detection via heartbeat, automatic re-queuing of orphaned jobs
 - **Extensible backend system** — `apt`, `systemd`, `rke2`, `ping`, and `test` backends included
-- **Embedded NATS** — the controller runs an in-process NATS server; no external dependencies
+- **Embedded NATS** — each controller runs an in-process NATS server; cluster mode for multi-controller deployments
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    Client["Client\n(gridc CLI)"]
+    Client["Client<br/>(gridc CLI)"]
 
-    subgraph Controller
-        API["API Server"]
-        Scheduler
-        NATS["Embedded NATS\n+ JetStream"]
+    subgraph Controller 1
+        API1["API Server"]
+        Sched1["Scheduler"]
+        NATS1["Embedded NATS<br/>+ JetStream"]
     end
+
+    subgraph Controller 2
+        API2["API Server"]
+        Sched2["Scheduler"]
+        NATS2["Embedded NATS<br/>+ JetStream"]
+    end
+
+    NATS1 <-- "Cluster" --> NATS2
 
     subgraph Workers
-        A["Worker A\ngroups: web, prod\nbackends: apt, systemd"]
-        B["Worker B\ngroups: web, prod\nbackends: apt, systemd"]
-        C["Worker C\ngroups: db, prod\nbackends: apt, systemd"]
+        A["Worker A<br/>groups: web, prod"]
+        B["Worker B<br/>groups: web, prod"]
+        C["Worker C<br/>groups: db, prod"]
     end
 
-    Client -- "HTTP" --> API
-    NATS -- "NATS" --> A
-    NATS -- "NATS" --> B
-    NATS -- "NATS" --> C
+    Client -- "HTTP" --> API1
+    Client -. "HTTP" .-> API2
+    NATS1 -- "NATS" --> A
+    NATS1 -- "NATS" --> B
+    NATS2 -- "NATS" --> C
 ```
 
-The CLI client (`gridc`) is HTTP-only — it talks to the controller's REST API. Workers connect to the controller's embedded NATS server.
+The CLI client (`gridc`) is HTTP-only — it talks to any controller's REST API. Workers connect to the NATS cluster. Multiple controllers share a NATS cluster and compete for jobs — no leader election needed. If a controller dies, others recover its orphaned jobs automatically.
 
 ## Execution Models
 
@@ -243,6 +254,7 @@ Set the controller address with `-a` or `GRID_API` environment variable (default
 | `GET` | `/jobs` | List all jobs |
 | `GET` | `/nodes` | List registered nodes |
 | `GET` | `/node/:id` | Get node details |
+| `GET` | `/controllers` | List registered controllers |
 | `GET` | `/status` | Cluster status |
 
 ### Example: Submit a job
@@ -300,6 +312,9 @@ nats:
 scheduler:
   max_concurrent: 5
   max_pending: 100
+controller:
+  heartbeat_interval: 15s
+  stale_threshold: 60s
 ```
 
 ### Worker (`worker.yaml`)

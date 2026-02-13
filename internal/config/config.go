@@ -65,11 +65,17 @@ type SchedulerConfig struct {
 	MaxPending    int `yaml:"max_pending"`    // max jobs waiting in queue (default: 100)
 }
 
+type ControllerConfig struct {
+	HeartbeatInterval string `yaml:"heartbeat_interval"` // e.g. "15s" (default)
+	StaleThreshold    string `yaml:"stale_threshold"`    // e.g. "60s" (default)
+}
+
 type Config struct {
-	API       APIConfig       `yaml:"api"`
-	NATS      NATSConfig      `yaml:"nats"`
-	Worker    WorkerConfig    `yaml:"worker"`
-	Scheduler SchedulerConfig `yaml:"scheduler"`
+	API        APIConfig        `yaml:"api"`
+	NATS       NATSConfig       `yaml:"nats"`
+	Worker     WorkerConfig     `yaml:"worker"`
+	Scheduler  SchedulerConfig  `yaml:"scheduler"`
+	Controller ControllerConfig `yaml:"controller"`
 }
 
 func LoadConfig(configFile string) *Config {
@@ -143,6 +149,10 @@ func Defaults() *Config {
 		Scheduler: SchedulerConfig{
 			MaxConcurrent: 5,
 			MaxPending:    100,
+		},
+		Controller: ControllerConfig{
+			HeartbeatInterval: "15s",
+			StaleThreshold:    "60s",
 		},
 	}
 }

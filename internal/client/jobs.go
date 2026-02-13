@@ -13,7 +13,9 @@ import (
 // CreateJob stores a new job in the jobs KV bucket using atomic create.
 // Returns the job and its KV revision for subsequent CAS updates.
 func (c *Client) CreateJob(job models.Job) (models.Job, uint64, error) {
-	job.CreatedAt = time.Now().UTC()
+	if job.CreatedAt.IsZero() {
+		job.CreatedAt = time.Now().UTC()
+	}
 	job.UpdatedAt = job.CreatedAt
 
 	data, err := json.Marshal(job)

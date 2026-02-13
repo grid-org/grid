@@ -56,6 +56,7 @@ func New(cfg *config.Config, c *client.Client, sched *scheduler.Scheduler) *API 
 	a.echo.GET("/jobs", a.listJobs)
 	a.echo.GET("/nodes", a.listNodes)
 	a.echo.GET("/node/:id", a.getNode)
+	a.echo.GET("/controllers", a.listControllers)
 
 	return a
 }
@@ -188,6 +189,15 @@ func (a *API) getNode(ctx echo.Context) error {
 	}
 
 	return ctx.JSON(http.StatusOK, node)
+}
+
+func (a *API) listControllers(ctx echo.Context) error {
+	controllers, err := a.client.ListControllers()
+	if err != nil {
+		return ctx.JSON(http.StatusInternalServerError, J{"error": err.Error()})
+	}
+
+	return ctx.JSON(http.StatusOK, controllers)
 }
 
 func generateID() string {

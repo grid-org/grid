@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/grid-org/grid/internal/api"
 	"github.com/grid-org/grid/internal/client"
 	"github.com/grid-org/grid/internal/common"
 	"github.com/grid-org/grid/internal/config"
+	"github.com/grid-org/grid/internal/models"
 	"github.com/grid-org/grid/internal/registry"
 	"github.com/grid-org/grid/internal/scheduler"
 
@@ -20,12 +22,14 @@ import (
 )
 
 type Controller struct {
-	api       *api.API
-	config    *config.Config
-	client    *client.Client
-	server    *server.Server
-	scheduler *scheduler.Scheduler
-	registry  *registry.Registry
+	api          *api.API
+	config       *config.Config
+	client       *client.Client
+	server       *server.Server
+	scheduler    *scheduler.Scheduler
+	registry     *registry.Registry
+	controllerID string
+	startedAt    time.Time
 }
 
 func New(cfg *config.Config) *Controller {
@@ -96,9 +100,23 @@ func (c *Controller) Start() error {
 		return err
 	}
 
+	// Initialize controller identity
+	c.controllerID = c.config.NATS.Name
+	c.startedAt = time.Now().UTC()
+
+	// Register this controller
+	if err := c.registerController(); err != nil {
+		return fmt.Errorf("registering controller: %w", err)
+	}
+
+	// Start heartbeat
+	hbCtx, hbCancel := context.WithCancel(context.Background())
+	defer hbCancel()
+	go c.heartbeat(hbCtx)
+
 	// Initialize registry and scheduler
 	c.registry = registry.New(c.client)
-	c.scheduler = scheduler.New(c.client, c.registry, c.config.Scheduler)
+	c.scheduler = scheduler.New(c.client, c.registry, c.config.Scheduler, c.controllerID)
 
 	// Start the scheduler's request-pulling loop
 	schedCtx, schedCancel := context.WithCancel(context.Background())
@@ -108,7 +126,18 @@ func (c *Controller) Start() error {
 		return fmt.Errorf("starting scheduler: %w", err)
 	}
 
-	log.Info("Controller started")
+	// Start stale job recovery loop
+	staleThreshold := 60 * time.Second
+	if c.config.Controller.StaleThreshold != "" {
+		if d, err := time.ParseDuration(c.config.Controller.StaleThreshold); err == nil {
+			staleThreshold = d
+		} else {
+			log.Warn("Invalid stale_threshold, using default", "value", c.config.Controller.StaleThreshold)
+		}
+	}
+	c.scheduler.StartRecovery(schedCtx, staleThreshold)
+
+	log.Info("Controller started", "id", c.controllerID)
 
 	if c.config.API.Enabled {
 		c.api = api.New(c.config, c.client, c.scheduler)
@@ -120,6 +149,8 @@ func (c *Controller) Start() error {
 	common.WaitForSignal()
 
 	schedCancel()
+	hbCancel()
+	c.deregisterController()
 
 	if c.api != nil {
 		if err := c.api.Stop(); err != nil {
@@ -196,5 +227,61 @@ func EnsureInfrastructure(c *client.Client, replicas int) error {
 		return fmt.Errorf("ensuring nodes bucket: %w", err)
 	}
 
+	// KV: controller registration
+	if _, err := c.EnsureKV(jetstream.KeyValueConfig{
+		Bucket: "controllers",
+	}); err != nil {
+		return fmt.Errorf("ensuring controllers bucket: %w", err)
+	}
+
 	return nil
+}
+
+func (c *Controller) registerController() error {
+	hostname, _ := os.Hostname()
+	info := models.ControllerInfo{
+		ID:        c.controllerID,
+		Hostname:  hostname,
+		Status:    "online",
+		LastSeen:  time.Now().UTC(),
+		StartedAt: c.startedAt,
+	}
+	return c.client.PutController(info)
+}
+
+func (c *Controller) deregisterController() {
+	info := models.ControllerInfo{
+		ID:        c.controllerID,
+		Hostname:  "",
+		Status:    "offline",
+		LastSeen:  time.Now().UTC(),
+		StartedAt: c.startedAt,
+	}
+	if err := c.client.PutController(info); err != nil {
+		log.Error("Failed to deregister controller", "error", err)
+	}
+}
+
+func (c *Controller) heartbeat(ctx context.Context) {
+	interval := 15 * time.Second
+	if c.config.Controller.HeartbeatInterval != "" {
+		if d, err := time.ParseDuration(c.config.Controller.HeartbeatInterval); err == nil {
+			interval = d
+		} else {
+			log.Warn("Invalid controller heartbeat_interval, using default", "value", c.config.Controller.HeartbeatInterval)
+		}
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := c.registerController(); err != nil {
+				log.Error("Controller heartbeat failed", "error", err)
+			}
+		}
+	}
 }

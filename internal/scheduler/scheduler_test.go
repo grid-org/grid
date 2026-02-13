@@ -182,7 +182,7 @@ func setupScheduler(t *testing.T, env *testutil.TestEnv, nodeIDs []string, group
 		env.RegisterNodes(t, testutil.OnlineNode(id, groups...))
 	}
 	reg := registry.New(env.Client)
-	return scheduler.New(env.Client, reg, config.SchedulerConfig{})
+	return scheduler.New(env.Client, reg, config.SchedulerConfig{}, "")
 }
 
 // --- Tests ---
@@ -939,7 +939,7 @@ func TestQueueFull_RejectsWhenPendingExceeded(t *testing.T) {
 	sched := scheduler.New(env.Client, reg, config.SchedulerConfig{
 		MaxConcurrent: 2,
 		MaxPending:    3,
-	})
+	}, "")
 
 	// Fill the pending queue
 	for i := 0; i < 3; i++ {
@@ -978,7 +978,7 @@ func TestMaxConcurrent_LimitsParallelJobs(t *testing.T) {
 	sched := scheduler.New(env.Client, reg, config.SchedulerConfig{
 		MaxConcurrent: maxConcurrent,
 		MaxPending:    100,
-	})
+	}, "")
 
 	ctx, ctxCancel := context.WithCancel(context.Background())
 	defer ctxCancel()
@@ -1032,7 +1032,7 @@ func TestConcurrentJobs_CompleteIndependently(t *testing.T) {
 	sched := scheduler.New(env.Client, reg, config.SchedulerConfig{
 		MaxConcurrent: 3,
 		MaxPending:    100,
-	})
+	}, "")
 
 	ctx, ctxCancel := context.WithCancel(context.Background())
 	defer ctxCancel()
@@ -1668,6 +1668,315 @@ func TestPipeline_WithRetry(t *testing.T) {
 	got, _, _ := env.Client.GetJob("pipe-retry")
 	if got.Status != models.JobCompleted {
 		t.Errorf("Status = %q, want completed", got.Status)
+	}
+}
+
+// --- Multi-Controller HA Tests ---
+
+func TestCASClaim_TwoSchedulers(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	for _, id := range nodes {
+		env.RegisterNodes(t, testutil.OnlineNode(id, "web"))
+	}
+
+	reg := registry.New(env.Client)
+
+	// Two schedulers with different controller IDs compete for the same job
+	sched1 := scheduler.New(env.Client, reg, config.SchedulerConfig{}, "ctrl-1")
+	sched2 := scheduler.New(env.Client, reg, config.SchedulerConfig{}, "ctrl-2")
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+
+	if err := sched1.Start(ctx); err != nil {
+		t.Fatalf("Start sched1: %v", err)
+	}
+	if err := sched2.Start(ctx); err != nil {
+		t.Fatalf("Start sched2: %v", err)
+	}
+
+	stopWorkers := startMockWorkers(t, env, nodes, behaviorSucceed)
+	defer stopWorkers()
+
+	job := models.Job{
+		ID:     "cas-claim-1",
+		Target: models.Target{Scope: "all"},
+		Tasks:  []models.Phase{{Backend: "test", Action: "succeed"}},
+	}
+
+	// Either scheduler can enqueue — use sched1
+	_, err := sched1.Enqueue(job)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		j, _, _ := env.Client.GetJob("cas-claim-1")
+		return j.Status == models.JobCompleted
+	}, "job should complete")
+
+	got, _, _ := env.Client.GetJob("cas-claim-1")
+	if got.Status != models.JobCompleted {
+		t.Errorf("Status = %q, want completed", got.Status)
+	}
+	// Job should have an owner set (either ctrl-1 or ctrl-2)
+	if got.Owner == "" {
+		t.Error("Owner should be set after claiming")
+	}
+	if got.Owner != "ctrl-1" && got.Owner != "ctrl-2" {
+		t.Errorf("Owner = %q, want ctrl-1 or ctrl-2", got.Owner)
+	}
+}
+
+func TestCrossCancelRunning(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	for _, id := range nodes {
+		env.RegisterNodes(t, testutil.OnlineNode(id, "web"))
+	}
+
+	reg := registry.New(env.Client)
+
+	// Scheduler 1 runs the job, scheduler 2 cancels it
+	sched1 := scheduler.New(env.Client, reg, config.SchedulerConfig{}, "ctrl-1")
+	sched2 := scheduler.New(env.Client, reg, config.SchedulerConfig{}, "ctrl-2")
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+
+	if err := sched1.Start(ctx); err != nil {
+		t.Fatalf("Start sched1: %v", err)
+	}
+
+	// Use slow workers so job stays running long enough
+	stopWorkers := startMockWorkers(t, env, nodes, behaviorSlow)
+	defer stopWorkers()
+
+	job := models.Job{
+		ID:     "cross-cancel-1",
+		Target: models.Target{Scope: "all"},
+		Tasks:  []models.Phase{{Backend: "test", Action: "sleep", Params: map[string]string{"duration": "30s"}}},
+	}
+
+	_, err := sched1.Enqueue(job)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	// Wait for job to start running on sched1
+	testutil.WaitFor(t, 5*time.Second, func() bool {
+		j, _, _ := env.Client.GetJob("cross-cancel-1")
+		return j.Status == models.JobRunning
+	}, "job should start running")
+
+	// sched2 cancels it — job is not in sched2's running map, so it uses CAS cancel
+	cancelled, err := sched2.Cancel("cross-cancel-1")
+	if err != nil {
+		t.Fatalf("Cancel from sched2: %v", err)
+	}
+	if !cancelled {
+		t.Error("Cancel should return true for running job")
+	}
+
+	// sched1 should detect the cancellation on its next updateJob() CAS conflict
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		j, _, _ := env.Client.GetJob("cross-cancel-1")
+		return j.Status == models.JobCancelled
+	}, "job should become cancelled")
+}
+
+func TestRecoverStaleJob_DeadController(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	for _, id := range nodes {
+		env.RegisterNodes(t, testutil.OnlineNode(id, "web"))
+	}
+
+	// Register a dead controller
+	deadCtrl := models.ControllerInfo{
+		ID:        "dead-ctrl",
+		Hostname:  "dead-host",
+		Status:    "offline",
+		LastSeen:  time.Now().Add(-5 * time.Minute).UTC(),
+		StartedAt: time.Now().Add(-10 * time.Minute).UTC(),
+	}
+	env.RegisterControllers(t, deadCtrl)
+
+	// Create a job that appears to be running on the dead controller
+	staleJob := models.Job{
+		ID:        "stale-running-1",
+		Target:    models.Target{Scope: "all"},
+		Tasks:     []models.Phase{{Backend: "test", Action: "succeed"}},
+		Status:    models.JobRunning,
+		Owner:     "dead-ctrl",
+		Expected:  []string{"n1"},
+		Results:   models.JobResults{"0": {"n1": models.NodeResult{Status: models.ResultSuccess}}},
+		Step:      1,
+	}
+	env.Client.CreateJob(staleJob)
+
+	// Create a live scheduler that will run recovery
+	reg := registry.New(env.Client)
+	sched := scheduler.New(env.Client, reg, config.SchedulerConfig{}, "live-ctrl")
+
+	// Register the live controller
+	liveCtrl := testutil.OnlineController("live-ctrl")
+	env.RegisterControllers(t, liveCtrl)
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	stopWorkers := startMockWorkers(t, env, nodes, behaviorSucceed)
+	defer stopWorkers()
+
+	// Set threshold and trigger recovery directly (avoids waiting for periodic loop)
+	sched.StartRecovery(ctx, 30*time.Second)
+	sched.RecoverStaleJobs()
+
+	// Wait for the stale job to be recovered and re-executed
+	testutil.WaitFor(t, 15*time.Second, func() bool {
+		j, _, _ := env.Client.GetJob("stale-running-1")
+		return j.Status == models.JobCompleted
+	}, "stale job should be recovered and completed")
+
+	got, _, _ := env.Client.GetJob("stale-running-1")
+	if got.Status != models.JobCompleted {
+		t.Errorf("Status = %q, want completed", got.Status)
+	}
+	if got.Owner != "live-ctrl" {
+		t.Errorf("Owner = %q, want live-ctrl", got.Owner)
+	}
+}
+
+func TestRecoverStalePending(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	for _, id := range nodes {
+		env.RegisterNodes(t, testutil.OnlineNode(id, "web"))
+	}
+
+	// Create a stale pending job (simulates crash between ack and claim)
+	stalePending := models.Job{
+		ID:        "stale-pending-1",
+		Target:    models.Target{Scope: "all"},
+		Tasks:     []models.Phase{{Backend: "test", Action: "succeed"}},
+		Status:    models.JobPending,
+		Owner:     "",
+		Expected:  []string{"n1"},
+		Results:   models.JobResults{},
+		CreatedAt: time.Now().Add(-5 * time.Minute).UTC(),
+	}
+	env.Client.CreateJob(stalePending)
+
+	// Create a live scheduler
+	reg := registry.New(env.Client)
+	sched := scheduler.New(env.Client, reg, config.SchedulerConfig{}, "live-ctrl")
+
+	// Register the live controller
+	liveCtrl := testutil.OnlineController("live-ctrl")
+	env.RegisterControllers(t, liveCtrl)
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	stopWorkers := startMockWorkers(t, env, nodes, behaviorSucceed)
+	defer stopWorkers()
+
+	// Set threshold and trigger recovery directly
+	sched.StartRecovery(ctx, 30*time.Second)
+	sched.RecoverStaleJobs()
+
+	// Wait for the stale pending job to be recovered
+	testutil.WaitFor(t, 15*time.Second, func() bool {
+		j, _, _ := env.Client.GetJob("stale-pending-1")
+		return j.Status == models.JobCompleted
+	}, "stale pending job should be recovered and completed")
+
+	got, _, _ := env.Client.GetJob("stale-pending-1")
+	if got.Status != models.JobCompleted {
+		t.Errorf("Status = %q, want completed", got.Status)
+	}
+}
+
+func TestRecovery_ConcurrentRecoverers(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	for _, id := range nodes {
+		env.RegisterNodes(t, testutil.OnlineNode(id, "web"))
+	}
+
+	// Register a dead controller
+	deadCtrl := models.ControllerInfo{
+		ID:        "dead-ctrl",
+		Hostname:  "dead-host",
+		Status:    "offline",
+		LastSeen:  time.Now().Add(-5 * time.Minute).UTC(),
+		StartedAt: time.Now().Add(-10 * time.Minute).UTC(),
+	}
+	env.RegisterControllers(t, deadCtrl)
+
+	// Create a stale running job owned by dead controller
+	staleJob := models.Job{
+		ID:       "concurrent-recover-1",
+		Target:   models.Target{Scope: "all"},
+		Tasks:    []models.Phase{{Backend: "test", Action: "succeed"}},
+		Status:   models.JobRunning,
+		Owner:    "dead-ctrl",
+		Expected: []string{"n1"},
+		Results:  models.JobResults{},
+	}
+	env.Client.CreateJob(staleJob)
+
+	reg := registry.New(env.Client)
+
+	// Two live schedulers that will both try to recover
+	sched1 := scheduler.New(env.Client, reg, config.SchedulerConfig{}, "live-ctrl-1")
+	sched2 := scheduler.New(env.Client, reg, config.SchedulerConfig{}, "live-ctrl-2")
+
+	env.RegisterControllers(t, testutil.OnlineController("live-ctrl-1"))
+	env.RegisterControllers(t, testutil.OnlineController("live-ctrl-2"))
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+
+	if err := sched1.Start(ctx); err != nil {
+		t.Fatalf("Start sched1: %v", err)
+	}
+	if err := sched2.Start(ctx); err != nil {
+		t.Fatalf("Start sched2: %v", err)
+	}
+
+	stopWorkers := startMockWorkers(t, env, nodes, behaviorSucceed)
+	defer stopWorkers()
+
+	// Both start recovery and trigger immediately — CAS prevents double-recovery
+	sched1.StartRecovery(ctx, 30*time.Second)
+	sched2.StartRecovery(ctx, 30*time.Second)
+	sched1.RecoverStaleJobs()
+	sched2.RecoverStaleJobs()
+
+	// Wait for the stale job to be recovered
+	testutil.WaitFor(t, 15*time.Second, func() bool {
+		j, _, _ := env.Client.GetJob("concurrent-recover-1")
+		return j.Status == models.JobCompleted
+	}, "job should be recovered by one of the schedulers")
+
+	got, _, _ := env.Client.GetJob("concurrent-recover-1")
+	if got.Status != models.JobCompleted {
+		t.Errorf("Status = %q, want completed", got.Status)
+	}
+	// Owner should be one of the live controllers
+	if got.Owner != "live-ctrl-1" && got.Owner != "live-ctrl-2" {
+		t.Errorf("Owner = %q, want live-ctrl-1 or live-ctrl-2", got.Owner)
 	}
 }
 
