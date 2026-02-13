@@ -53,6 +53,44 @@ func (c *Client) PutKV(bucket, key string, value []byte) error {
 	return nil
 }
 
+// CreateKV atomically inserts a key into a KV bucket.
+// Fails if the key already exists. Returns the new revision.
+func (c *Client) CreateKV(bucket, key string, value []byte) (uint64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	bucketObj, err := c.js.KeyValue(ctx, bucket)
+	if err != nil {
+		return 0, err
+	}
+
+	rev, err := bucketObj.Create(ctx, key, value)
+	if err != nil {
+		return 0, err
+	}
+
+	return rev, nil
+}
+
+// UpdateKV performs a CAS (Compare-And-Swap) update on a KV key.
+// Fails if the stored revision doesn't match. Returns the new revision.
+func (c *Client) UpdateKV(bucket, key string, value []byte, revision uint64) (uint64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	bucketObj, err := c.js.KeyValue(ctx, bucket)
+	if err != nil {
+		return 0, err
+	}
+
+	rev, err := bucketObj.Update(ctx, key, value, revision)
+	if err != nil {
+		return 0, err
+	}
+
+	return rev, nil
+}
+
 func (c *Client) DeleteKV(bucket, key string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

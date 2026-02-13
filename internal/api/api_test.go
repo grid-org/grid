@@ -173,7 +173,7 @@ func TestCancelJob_Pending(t *testing.T) {
 		t.Errorf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 
-	got, _ := env.Client.GetJob("cancel-api")
+	got, _, _ := env.Client.GetJob("cancel-api")
 	if got.Status != models.JobCancelled {
 		t.Errorf("Status = %q, want cancelled", got.Status)
 	}

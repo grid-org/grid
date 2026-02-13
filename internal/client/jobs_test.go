@@ -61,7 +61,7 @@ func TestCreateJob(t *testing.T) {
 		Status: models.JobPending,
 	}
 
-	created, err := env.Client.CreateJob(job)
+	created, _, err := env.Client.CreateJob(job)
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)
 	}
@@ -88,14 +88,17 @@ func TestGetJob(t *testing.T) {
 		Expected: []string{"web-01"},
 	}
 
-	_, err := env.Client.CreateJob(job)
+	_, _, err := env.Client.CreateJob(job)
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)
 	}
 
-	got, err := env.Client.GetJob("test-get-1")
+	got, rev, err := env.Client.GetJob("test-get-1")
 	if err != nil {
 		t.Fatalf("GetJob: %v", err)
+	}
+	if rev == 0 {
+		t.Error("revision should be non-zero")
 	}
 
 	if got.ID != "test-get-1" {
@@ -112,7 +115,7 @@ func TestGetJob(t *testing.T) {
 func TestGetJob_NotFound(t *testing.T) {
 	env := testutil.NewTestEnv(t)
 
-	_, err := env.Client.GetJob("nonexistent")
+	_, _, err := env.Client.GetJob("nonexistent")
 	if err == nil {
 		t.Fatal("expected error for nonexistent job")
 	}
@@ -128,18 +131,19 @@ func TestUpdateJob(t *testing.T) {
 		Status: models.JobPending,
 	}
 
-	created, err := env.Client.CreateJob(job)
+	created, rev, err := env.Client.CreateJob(job)
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)
 	}
 
 	created.Status = models.JobRunning
 	created.Step = 1
-	if err := env.Client.UpdateJob(created); err != nil {
+	_, err = env.Client.UpdateJob(created, rev)
+	if err != nil {
 		t.Fatalf("UpdateJob: %v", err)
 	}
 
-	got, err := env.Client.GetJob("test-update-1")
+	got, _, err := env.Client.GetJob("test-update-1")
 	if err != nil {
 		t.Fatalf("GetJob: %v", err)
 	}
@@ -164,7 +168,7 @@ func TestListJobs(t *testing.T) {
 			Target: models.Target{Scope: "all"},
 			Tasks:  []models.Phase{{Backend: "test", Action: "succeed"}},
 		}
-		if _, err := env.Client.CreateJob(job); err != nil {
+		if _, _, err := env.Client.CreateJob(job); err != nil {
 			t.Fatalf("CreateJob(%s): %v", id, err)
 		}
 	}

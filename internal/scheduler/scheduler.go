@@ -44,6 +44,7 @@ type execState struct {
 	flatIndex         int
 	stepFailed        bool
 	failFastTriggered bool
+	revision          uint64 // KV revision for CAS updates
 }
 
 func New(c *client.Client, reg *registry.Registry, cfg config.SchedulerConfig) *Scheduler {
@@ -60,6 +61,26 @@ func New(c *client.Client, reg *registry.Registry, cfg config.SchedulerConfig) *
 		sem:        make(chan struct{}, cfg.MaxConcurrent),
 		maxPending: cfg.MaxPending,
 	}
+}
+
+// updateJob performs a CAS update on the job, tracking the new revision in state.
+// On CAS conflict, it re-reads the job to check if it was cancelled externally.
+func (s *Scheduler) updateJob(job *models.Job, state *execState) error {
+	rev, err := s.client.UpdateJob(*job, state.revision)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyExists) {
+			// CAS conflict — re-read to check if job was cancelled
+			current, currentRev, getErr := s.client.GetJob(job.ID)
+			if getErr == nil && current.Status == models.JobCancelled {
+				job.Status = models.JobCancelled
+				state.revision = currentRev
+				return nil // caller sees cancelled status and aborts
+			}
+		}
+		return err
+	}
+	state.revision = rev
+	return nil
 }
 
 // Start begins pulling jobs from the requests stream (WorkQueue consumer).
@@ -136,8 +157,8 @@ func (s *Scheduler) Enqueue(job models.Job) (models.Job, error) {
 	job.Step = 0
 	job.Results = make(models.JobResults)
 
-	// Store job
-	job, err = s.client.CreateJob(job)
+	// Store job (atomic create — fails if job ID already exists)
+	job, _, err = s.client.CreateJob(job)
 	if err != nil {
 		return job, fmt.Errorf("creating job: %w", err)
 	}
@@ -166,13 +187,14 @@ func (s *Scheduler) Cancel(jobID string) (bool, error) {
 
 	if !ok {
 		// Not currently running — check if it's pending
-		job, err := s.client.GetJob(jobID)
+		job, rev, err := s.client.GetJob(jobID)
 		if err != nil {
 			return false, fmt.Errorf("job not found: %w", err)
 		}
 		if job.Status == models.JobPending {
 			job.Status = models.JobCancelled
-			return true, s.client.UpdateJob(job)
+			_, err = s.client.UpdateJob(job, rev)
+			return err == nil, err
 		}
 		return false, nil
 	}
@@ -241,16 +263,33 @@ func (s *Scheduler) execute(ctx context.Context, job models.Job) {
 	leafCount := models.PhaseLeafCount(job.Tasks)
 	log.Info("Executing job", "id", job.ID, "phases", len(job.Tasks), "leaves", leafCount, "nodes", len(job.Expected), "strategy", job.Strategy)
 
-	job.Status = models.JobRunning
-	if err := s.client.UpdateJob(job); err != nil {
-		log.Error("Failed to update job status", "id", job.ID, "error", err)
+	// Re-read job from KV to get the current revision (may have been cancelled while pending)
+	current, rev, err := s.client.GetJob(job.ID)
+	if err != nil {
+		log.Error("Failed to re-read job from KV", "id", job.ID, "error", err)
 		return
 	}
+	if current.Status == models.JobCancelled {
+		log.Info("Skipping cancelled job", "id", job.ID)
+		return
+	}
+	job = current
 
 	state := &execState{
 		activeNodes: make([]string, len(job.Expected)),
+		revision:    rev,
 	}
 	copy(state.activeNodes, job.Expected)
+
+	job.Status = models.JobRunning
+	if err := s.updateJob(&job, state); err != nil {
+		log.Error("Failed to update job status", "id", job.ID, "error", err)
+		return
+	}
+	if job.Status == models.JobCancelled {
+		log.Info("Job done", "id", job.ID, "status", job.Status)
+		return
+	}
 
 	s.executePhases(ctx, &job, job.Tasks, state)
 
@@ -262,7 +301,7 @@ func (s *Scheduler) execute(ctx context.Context, job models.Job) {
 
 	if ctx.Err() != nil {
 		job.Status = models.JobCancelled
-		s.client.UpdateJob(job)
+		s.updateJob(&job, state)
 		log.Info("Job done", "id", job.ID, "status", job.Status)
 		return
 	}
@@ -272,7 +311,7 @@ func (s *Scheduler) execute(ctx context.Context, job models.Job) {
 	} else {
 		job.Status = models.JobCompleted
 	}
-	if err := s.client.UpdateJob(job); err != nil {
+	if err := s.updateJob(&job, state); err != nil {
 		log.Error("Failed to mark job done", "id", job.ID, "error", err)
 	}
 	log.Info("Job done", "id", job.ID, "status", job.Status)
@@ -284,14 +323,14 @@ func (s *Scheduler) executePhases(ctx context.Context, job *models.Job, phases [
 		if ctx.Err() != nil {
 			log.Info("Job cancelled or timed out", "job", job.ID, "flatIndex", state.flatIndex)
 			job.Status = models.JobCancelled
-			s.client.UpdateJob(*job)
+			s.updateJob(job, state)
 			return
 		}
 
 		if len(state.activeNodes) == 0 {
 			log.Info("No active nodes remaining", "job", job.ID)
 			job.Status = models.JobFailed
-			s.client.UpdateJob(*job)
+			s.updateJob(job, state)
 			return
 		}
 
@@ -324,7 +363,7 @@ func (s *Scheduler) executePhases(ctx context.Context, job *models.Job, phases [
 // storeSkippedPhase writes skipped results for all leaves in a phase (recursive for pipelines).
 func (s *Scheduler) storeSkippedPhase(job *models.Job, phase models.Phase, state *execState) {
 	if phase.IsLeaf() {
-		s.storeSkippedResults(job, state.flatIndex, state.activeNodes)
+		s.storeSkippedResults(job, state.flatIndex, state.activeNodes, state)
 		state.flatIndex++
 	} else {
 		for _, sub := range phase.Tasks {
@@ -334,7 +373,7 @@ func (s *Scheduler) storeSkippedPhase(job *models.Job, phase models.Phase, state
 }
 
 // storeSkippedResults writes synthetic "skipped" results for all active nodes at a step.
-func (s *Scheduler) storeSkippedResults(job *models.Job, step int, activeNodes []string) {
+func (s *Scheduler) storeSkippedResults(job *models.Job, step int, activeNodes []string, state *execState) {
 	stepKey := strconv.Itoa(step)
 	if job.Results == nil {
 		job.Results = make(models.JobResults)
@@ -346,7 +385,7 @@ func (s *Scheduler) storeSkippedResults(job *models.Job, step int, activeNodes [
 			Duration: "0s",
 		}
 	}
-	s.client.UpdateJob(*job)
+	s.updateJob(job, state)
 }
 
 // executeBarrierStep dispatches a leaf phase to all active nodes via broadcast,
@@ -357,7 +396,7 @@ func (s *Scheduler) executeBarrierStep(ctx context.Context, job *models.Job, pha
 	stepIndex := state.flatIndex
 
 	job.Step = stepIndex
-	if err := s.client.UpdateJob(*job); err != nil {
+	if err := s.updateJob(job, state); err != nil {
 		log.Error("Failed to update job step", "id", job.ID, "error", err)
 	}
 
@@ -388,7 +427,7 @@ func (s *Scheduler) executeBarrierStep(ctx context.Context, job *models.Job, pha
 			case <-time.After(backoff):
 			case <-ctx.Done():
 				job.Status = models.JobCancelled
-				s.client.UpdateJob(*job)
+				s.updateJob(job, state)
 				return
 			}
 
@@ -396,7 +435,7 @@ func (s *Scheduler) executeBarrierStep(ctx context.Context, job *models.Job, pha
 			if err := s.client.PublishCommand(job.ID, stepIndex, job.Target, task); err != nil {
 				log.Error("Failed to publish retry command", "job", job.ID, "step", stepIndex, "error", err)
 				job.Status = models.JobFailed
-				s.client.UpdateJob(*job)
+				s.updateJob(job, state)
 				return
 			}
 		} else {
@@ -404,7 +443,7 @@ func (s *Scheduler) executeBarrierStep(ctx context.Context, job *models.Job, pha
 			if err := s.client.PublishCommand(job.ID, stepIndex, job.Target, task); err != nil {
 				log.Error("Failed to publish command", "job", job.ID, "step", stepIndex, "error", err)
 				job.Status = models.JobFailed
-				s.client.UpdateJob(*job)
+				s.updateJob(job, state)
 				return
 			}
 		}
@@ -420,7 +459,7 @@ func (s *Scheduler) executeBarrierStep(ctx context.Context, job *models.Job, pha
 				log.Error("Result collection failed", "job", job.ID, "step", stepIndex, "error", err)
 				job.Status = models.JobFailed
 			}
-			s.client.UpdateJob(*job)
+			s.updateJob(job, state)
 			return
 		}
 
@@ -435,7 +474,7 @@ func (s *Scheduler) executeBarrierStep(ctx context.Context, job *models.Job, pha
 
 		if !anyFailed {
 			// All succeeded, store and move on
-			s.storeResults(job, stepIndex, results, attempt)
+			s.storeResults(job, stepIndex, results, attempt, state)
 			lastErr = nil
 			break
 		}
@@ -447,7 +486,7 @@ func (s *Scheduler) executeBarrierStep(ctx context.Context, job *models.Job, pha
 		}
 
 		// Final attempt with failures — store and apply strategy
-		s.storeResults(job, stepIndex, results, attempt)
+		s.storeResults(job, stepIndex, results, attempt, state)
 		lastErr = fmt.Errorf("failures after %d attempts", maxAttempts)
 	}
 
@@ -477,7 +516,7 @@ func (s *Scheduler) executeBarrierStep(ctx context.Context, job *models.Job, pha
 
 		if len(state.activeNodes) == 0 {
 			job.Status = models.JobFailed
-			s.client.UpdateJob(*job)
+			s.updateJob(job, state)
 			return
 		}
 	}
@@ -508,7 +547,7 @@ func (s *Scheduler) executePipeline(ctx context.Context, job *models.Job, phase 
 	if err != nil {
 		log.Error("Failed to get results stream for pipeline", "job", job.ID, "error", err)
 		job.Status = models.JobFailed
-		s.client.UpdateJob(*job)
+		s.updateJob(job, state)
 		return
 	}
 
@@ -523,7 +562,7 @@ func (s *Scheduler) executePipeline(ctx context.Context, job *models.Job, phase 
 	if err != nil {
 		log.Error("Failed to create pipeline consumer", "job", job.ID, "error", err)
 		job.Status = models.JobFailed
-		s.client.UpdateJob(*job)
+		s.updateJob(job, state)
 		return
 	}
 	defer s.client.DeleteConsumer(stream, consumerName)
@@ -534,7 +573,7 @@ func (s *Scheduler) executePipeline(ctx context.Context, job *models.Job, phase 
 		if err := s.client.PublishCommandToNode(job.ID, startIndex, nodeID, firstTask); err != nil {
 			log.Error("Failed to dispatch pipeline step to node", "job", job.ID, "node", nodeID, "error", err)
 			job.Status = models.JobFailed
-			s.client.UpdateJob(*job)
+			s.updateJob(job, state)
 			return
 		}
 	}
@@ -576,7 +615,7 @@ func (s *Scheduler) executePipeline(ctx context.Context, job *models.Job, phase 
 				log.Error("Pipeline timed out", "job", job.ID)
 				job.Status = models.JobFailed
 			}
-			s.client.UpdateJob(*job)
+			s.updateJob(job, state)
 			return
 		}
 
@@ -588,7 +627,7 @@ func (s *Scheduler) executePipeline(ctx context.Context, job *models.Job, phase 
 				} else {
 					job.Status = models.JobFailed
 				}
-				s.client.UpdateJob(*job)
+				s.updateJob(job, state)
 				return
 			}
 			continue
@@ -641,7 +680,7 @@ func (s *Scheduler) executePipeline(ctx context.Context, job *models.Job, phase 
 				}
 
 				// Sub-step failed after all retries
-				s.storeSingleResult(job, expectedGlobalIndex, result, np.retries+1)
+				s.storeSingleResult(job, expectedGlobalIndex, result, np.retries+1, state)
 				state.stepFailed = true
 
 				if job.Strategy == models.StrategyContinue {
@@ -651,7 +690,7 @@ func (s *Scheduler) executePipeline(ctx context.Context, job *models.Job, phase 
 					// Store skipped results for remaining sub-steps
 					for si := np.currentStep + 1; si < len(subPhases); si++ {
 						globalIdx := startIndex + si
-						s.storeSingleSkipped(job, globalIdx, result.NodeID)
+						s.storeSingleSkipped(job, globalIdx, result.NodeID, state)
 					}
 				} else {
 					log.Info("Pipeline node failed, fail-fast triggered", "job", job.ID, "node", result.NodeID, "step", np.currentStep)
@@ -666,7 +705,7 @@ func (s *Scheduler) executePipeline(ctx context.Context, job *models.Job, phase 
 							// Store skipped for their remaining sub-steps
 							for si := other.currentStep; si < len(subPhases); si++ {
 								globalIdx := startIndex + si
-								s.storeSingleSkipped(job, globalIdx, nid)
+								s.storeSingleSkipped(job, globalIdx, nid, state)
 							}
 						}
 					}
@@ -677,7 +716,7 @@ func (s *Scheduler) executePipeline(ctx context.Context, job *models.Job, phase 
 			}
 
 			// Success — store result and advance
-			s.storeSingleResult(job, expectedGlobalIndex, result, np.retries+1)
+			s.storeSingleResult(job, expectedGlobalIndex, result, np.retries+1, state)
 			np.retries = 0 // reset for next sub-step
 			np.currentStep++
 
@@ -717,7 +756,7 @@ func (s *Scheduler) executePipeline(ctx context.Context, job *models.Job, phase 
 		}
 		if len(state.activeNodes) == 0 {
 			job.Status = models.JobFailed
-			s.client.UpdateJob(*job)
+			s.updateJob(job, state)
 			return
 		}
 	}
@@ -799,7 +838,7 @@ func (s *Scheduler) collectResults(ctx context.Context, jobID string, taskIndex 
 }
 
 // storeResults persists per-node results for a step into the job.
-func (s *Scheduler) storeResults(job *models.Job, step int, results []models.TaskResult, attempts int) {
+func (s *Scheduler) storeResults(job *models.Job, step int, results []models.TaskResult, attempts int, state *execState) {
 	stepKey := strconv.Itoa(step)
 	if job.Results == nil {
 		job.Results = make(models.JobResults)
@@ -817,11 +856,11 @@ func (s *Scheduler) storeResults(job *models.Job, step int, results []models.Tas
 		}
 		job.Results[stepKey][r.NodeID] = nr
 	}
-	s.client.UpdateJob(*job)
+	s.updateJob(job, state)
 }
 
 // storeSingleResult persists a single node's result for a step.
-func (s *Scheduler) storeSingleResult(job *models.Job, step int, result models.TaskResult, attempts int) {
+func (s *Scheduler) storeSingleResult(job *models.Job, step int, result models.TaskResult, attempts int, state *execState) {
 	stepKey := strconv.Itoa(step)
 	if job.Results == nil {
 		job.Results = make(models.JobResults)
@@ -839,11 +878,11 @@ func (s *Scheduler) storeSingleResult(job *models.Job, step int, result models.T
 		nr.Attempts = attempts
 	}
 	job.Results[stepKey][result.NodeID] = nr
-	s.client.UpdateJob(*job)
+	s.updateJob(job, state)
 }
 
 // storeSingleSkipped writes a skipped result for a single node at a step.
-func (s *Scheduler) storeSingleSkipped(job *models.Job, step int, nodeID string) {
+func (s *Scheduler) storeSingleSkipped(job *models.Job, step int, nodeID string, state *execState) {
 	stepKey := strconv.Itoa(step)
 	if job.Results == nil {
 		job.Results = make(models.JobResults)
@@ -855,5 +894,5 @@ func (s *Scheduler) storeSingleSkipped(job *models.Job, step int, nodeID string)
 		Status:   models.ResultSkipped,
 		Duration: "0s",
 	}
-	s.client.UpdateJob(*job)
+	s.updateJob(job, state)
 }
