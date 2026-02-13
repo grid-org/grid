@@ -103,6 +103,27 @@ func OnlineNode(id string, groups ...string) models.NodeInfo {
 	}
 }
 
+// RegisterControllers stores controller registrations in the controllers KV bucket.
+func (e *TestEnv) RegisterControllers(t *testing.T, controllers ...models.ControllerInfo) {
+	t.Helper()
+	for _, ctrl := range controllers {
+		if err := e.Client.PutController(ctrl); err != nil {
+			t.Fatalf("registering controller %s: %v", ctrl.ID, err)
+		}
+	}
+}
+
+// OnlineController returns a ControllerInfo suitable for testing with the given ID.
+func OnlineController(id string) models.ControllerInfo {
+	return models.ControllerInfo{
+		ID:        id,
+		Hostname:  id,
+		Status:    "online",
+		LastSeen:  time.Now().UTC(),
+		StartedAt: time.Now().UTC(),
+	}
+}
+
 // WaitFor polls fn every 50ms until it returns true or timeout elapses.
 func WaitFor(t *testing.T, timeout time.Duration, fn func() bool, msg string) {
 	t.Helper()

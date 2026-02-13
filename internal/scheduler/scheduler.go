@@ -36,6 +36,9 @@ type Scheduler struct {
 	sem        chan struct{} // buffered semaphore limiting concurrent jobs
 	pending    atomic.Int64  // count of enqueued but not-yet-running jobs
 	maxPending int
+
+	controllerID   string        // empty = single-controller mode (no ownership enforcement)
+	staleThreshold time.Duration // for recovery loop
 }
 
 // execState tracks mutable execution state across a job's phase tree.
@@ -47,7 +50,7 @@ type execState struct {
 	revision          uint64 // KV revision for CAS updates
 }
 
-func New(c *client.Client, reg *registry.Registry, cfg config.SchedulerConfig) *Scheduler {
+func New(c *client.Client, reg *registry.Registry, cfg config.SchedulerConfig, controllerID string) *Scheduler {
 	if cfg.MaxConcurrent <= 0 {
 		cfg.MaxConcurrent = 5
 	}
@@ -55,11 +58,12 @@ func New(c *client.Client, reg *registry.Registry, cfg config.SchedulerConfig) *
 		cfg.MaxPending = 100
 	}
 	return &Scheduler{
-		client:     c,
-		registry:   reg,
-		running:    make(map[string]context.CancelFunc),
-		sem:        make(chan struct{}, cfg.MaxConcurrent),
-		maxPending: cfg.MaxPending,
+		client:       c,
+		registry:     reg,
+		running:      make(map[string]context.CancelFunc),
+		sem:          make(chan struct{}, cfg.MaxConcurrent),
+		maxPending:   cfg.MaxPending,
+		controllerID: controllerID,
 	}
 }
 
@@ -179,28 +183,42 @@ func (s *Scheduler) Enqueue(job models.Job) (models.Job, error) {
 	return job, nil
 }
 
-// Cancel stops a running job. Returns true if the job was running and cancelled.
+// Cancel stops a running job. Returns true if the job was cancelled.
+// Handles three cases: (1) running locally, (2) pending, (3) running on another controller.
 func (s *Scheduler) Cancel(jobID string) (bool, error) {
 	s.mu.Lock()
 	cancel, ok := s.running[jobID]
 	s.mu.Unlock()
 
-	if !ok {
-		// Not currently running — check if it's pending
-		job, rev, err := s.client.GetJob(jobID)
-		if err != nil {
-			return false, fmt.Errorf("job not found: %w", err)
-		}
-		if job.Status == models.JobPending {
-			job.Status = models.JobCancelled
-			_, err = s.client.UpdateJob(job, rev)
-			return err == nil, err
-		}
-		return false, nil
+	if ok {
+		// Case 1: Running locally — cancel the context
+		cancel()
+		return true, nil
 	}
 
-	cancel()
-	return true, nil
+	// Not running locally — check KV state
+	job, rev, err := s.client.GetJob(jobID)
+	if err != nil {
+		return false, fmt.Errorf("job not found: %w", err)
+	}
+
+	switch job.Status {
+	case models.JobPending:
+		// Case 2: Still pending — CAS-cancel in KV
+		job.Status = models.JobCancelled
+		_, err = s.client.UpdateJob(job, rev)
+		return err == nil, err
+
+	case models.JobRunning:
+		// Case 3: Running on another controller — CAS-cancel in KV.
+		// The owning controller detects this on its next updateJob() CAS conflict.
+		job.Status = models.JobCancelled
+		_, err = s.client.UpdateJob(job, rev)
+		return err == nil, err
+
+	default:
+		return false, nil
+	}
 }
 
 func (s *Scheduler) handleRequest(ctx context.Context, msg jetstream.Msg) {
@@ -273,6 +291,13 @@ func (s *Scheduler) execute(ctx context.Context, job models.Job) {
 		log.Info("Skipping cancelled job", "id", job.ID)
 		return
 	}
+
+	// Check if another controller already claimed this job
+	if current.Status == models.JobRunning && current.Owner != "" && current.Owner != s.controllerID {
+		log.Info("Job already claimed by another controller", "id", job.ID, "owner", current.Owner)
+		return
+	}
+
 	job = current
 
 	state := &execState{
@@ -282,8 +307,12 @@ func (s *Scheduler) execute(ctx context.Context, job models.Job) {
 	copy(state.activeNodes, job.Expected)
 
 	job.Status = models.JobRunning
+	if s.controllerID != "" {
+		job.Owner = s.controllerID
+	}
 	if err := s.updateJob(&job, state); err != nil {
-		log.Error("Failed to update job status", "id", job.ID, "error", err)
+		// CAS conflict = another controller won the race
+		log.Info("Lost CAS race for job, skipping", "id", job.ID)
 		return
 	}
 	if job.Status == models.JobCancelled {
@@ -895,4 +924,129 @@ func (s *Scheduler) storeSingleSkipped(job *models.Job, step int, nodeID string,
 		Duration: "0s",
 	}
 	s.updateJob(job, state)
+}
+
+// StartRecovery begins a periodic goroutine that detects and recovers orphaned jobs
+// from dead controllers. The interval is half the stale threshold (minimum 15s).
+// An initial 10-second delay allows the cluster to stabilize on startup.
+func (s *Scheduler) StartRecovery(ctx context.Context, staleThreshold time.Duration) {
+	if s.controllerID == "" {
+		return // single-controller mode, no recovery needed
+	}
+	s.staleThreshold = staleThreshold
+
+	interval := staleThreshold / 2
+	if interval < 15*time.Second {
+		interval = 15 * time.Second
+	}
+
+	go func() {
+		// Initial delay for cluster stabilization
+		select {
+		case <-time.After(10 * time.Second):
+		case <-ctx.Done():
+			return
+		}
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.RecoverStaleJobs()
+			}
+		}
+	}()
+
+	log.Info("Recovery loop started", "interval", interval, "threshold", staleThreshold)
+}
+
+// RecoverStaleJobs finds and recovers jobs owned by dead or stale controllers.
+// Exported for direct use in tests; production code uses StartRecovery's periodic loop.
+func (s *Scheduler) RecoverStaleJobs() {
+	// Build set of dead controller IDs
+	controllers, err := s.client.ListControllers()
+	if err != nil {
+		log.Error("Recovery: failed to list controllers", "error", err)
+		return
+	}
+
+	deadControllers := make(map[string]bool)
+	now := time.Now().UTC()
+	for _, ctrl := range controllers {
+		if ctrl.ID == s.controllerID {
+			continue // skip self
+		}
+		if ctrl.Status == "offline" || now.Sub(ctrl.LastSeen) > s.staleThreshold {
+			deadControllers[ctrl.ID] = true
+		}
+	}
+
+	// Find stale jobs
+	jobs, err := s.client.ListJobs()
+	if err != nil {
+		log.Error("Recovery: failed to list jobs", "error", err)
+		return
+	}
+
+	for _, job := range jobs {
+		switch {
+		case job.Status == models.JobRunning && deadControllers[job.Owner]:
+			// Case A: running job owned by dead controller
+			log.Info("Recovery: found orphaned running job", "id", job.ID, "owner", job.Owner)
+			s.recoverJob(job, "dead controller")
+
+		case job.Status == models.JobPending && job.Owner == "" && now.Sub(job.CreatedAt) > s.staleThreshold:
+			// Case B: stale pending job (ack'd but never claimed — crash between ack and claim)
+			log.Info("Recovery: found stale pending job", "id", job.ID, "age", now.Sub(job.CreatedAt))
+			s.recoverJob(job, "stale pending")
+		}
+	}
+}
+
+// recoverJob resets a job to pending state and re-publishes it to the requests stream.
+// Uses CAS to prevent double-recovery by concurrent controllers.
+func (s *Scheduler) recoverJob(job models.Job, reason string) {
+	// Re-read from KV to get fresh revision
+	current, rev, err := s.client.GetJob(job.ID)
+	if err != nil {
+		log.Error("Recovery: failed to re-read job", "id", job.ID, "error", err)
+		return
+	}
+
+	// Verify the job is still in the expected state (may have been recovered by another controller)
+	if current.Status != job.Status {
+		log.Info("Recovery: job state changed, skipping", "id", job.ID, "expected", job.Status, "actual", current.Status)
+		return
+	}
+
+	// CAS-reset: pending, owner cleared, step 0, results cleared
+	current.Status = models.JobPending
+	current.Owner = ""
+	current.Step = 0
+	current.Results = make(models.JobResults)
+
+	_, err = s.client.UpdateJob(current, rev)
+	if err != nil {
+		// CAS conflict = another controller recovered it first
+		log.Info("Recovery: CAS conflict (another controller recovered it)", "id", job.ID)
+		return
+	}
+
+	// Re-publish to requests stream
+	data, err := json.Marshal(current)
+	if err != nil {
+		log.Error("Recovery: failed to encode job", "id", job.ID, "error", err)
+		return
+	}
+	subject := fmt.Sprintf("request.%s", current.ID)
+	if _, err := s.client.Publish(&nats.Msg{Subject: subject, Data: data}); err != nil {
+		log.Error("Recovery: failed to republish job", "id", job.ID, "error", err)
+		return
+	}
+
+	log.Info("Recovery: job recovered", "id", job.ID, "reason", reason)
 }

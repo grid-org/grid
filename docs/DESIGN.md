@@ -1,11 +1,12 @@
-# GRID Redesign: Orchestration Engine
+# GRID Architecture
 
 ## Overview
 
-This document describes the redesign of GRID's messaging topology and job model.
-The existing chassis is kept: embedded NATS server, Go package structure, backend
-plugin registry, CLI framework, Docker/Compose tooling. What changes is how jobs
-are defined, routed to workers, executed across multiple nodes, and reported on.
+This document describes GRID's messaging topology, job model, and orchestration
+engine. The system is built on an embedded NATS server, a Go package structure,
+a backend plugin registry, and Docker/Compose tooling. Jobs are defined
+declaratively, routed to workers via NATS subjects, executed across multiple
+nodes with barrier or pipeline semantics, and reported on via structured results.
 
 ## Design Principles
 
@@ -27,7 +28,7 @@ are defined, routed to workers, executed across multiple nodes, and reported on.
 
 ```mermaid
 flowchart LR
-    Client["Client\n(CLI / HTTP)"]
+    Client["Client<br/>(CLI / HTTP)"]
 
     subgraph Controller
         API["API Server"]
@@ -35,21 +36,22 @@ flowchart LR
         NATS["Embedded NATS + JetStream"]
 
         subgraph Streams
-            requests["requests\n(WorkQueue)"]
-            commands["commands\n(Limits)"]
-            results["results\n(Limits)"]
+            requests["requests<br/>(WorkQueue)"]
+            commands["commands<br/>(Limits)"]
+            results["results<br/>(Limits)"]
         end
 
         subgraph KV["KV Buckets"]
             jobs[("jobs")]
             nodes[("nodes")]
+            controllers[("controllers")]
         end
     end
 
     subgraph Workers
-        A["Worker A\ngroups: web, prod"]
-        B["Worker B\ngroups: web, prod"]
-        C["Worker C\ngroups: db, prod"]
+        A["Worker A<br/>groups: web, prod"]
+        B["Worker B<br/>groups: web, prod"]
+        C["Worker C<br/>groups: db, prod"]
     end
 
     Client -- "POST /job" --> API
@@ -57,6 +59,7 @@ flowchart LR
     requests -- "pull" --> Sched
     Sched -- "publish" --> commands
     Sched <-- "read/write" --> jobs
+    Sched <-- "heartbeat" --> controllers
     commands -- "consume" --> A & B & C
     A & B & C -- "publish" --> results
     results -- "consume" --> Sched
@@ -65,8 +68,8 @@ flowchart LR
 
 The three JetStream streams form the data backbone: `requests` (WorkQueue) for job submission,
 `commands` (Limits) for controller-to-worker dispatch, and `results` (Limits) for worker-to-controller
-reporting. Two KV buckets store durable state: `jobs` for job definitions/status and `nodes` for
-worker registration/health.
+reporting. Three KV buckets store durable state: `jobs` for job definitions/status, `nodes` for
+worker registration/health, and `controllers` for controller registration/heartbeat.
 
 ## Data Model
 
@@ -210,15 +213,36 @@ the scheduler pulls jobs from it with configurable concurrency limits
 
 ### Subject Hierarchy
 
-```
-Commands (controller → workers):
-  cmd.all.<backend>.<action>           Target every node (barrier broadcast)
-  cmd.group.<name>.<backend>.<action>  Target a group (barrier broadcast)
-  cmd.node.<id>.<backend>.<action>     Target a specific node (barrier or pipeline per-node)
+```mermaid
+flowchart LR
+    subgraph Commands ["Commands (controller → workers)"]
+        direction TB
+        cmd["cmd"]
+        cmd --> all["all"]
+        cmd --> group["group"]
+        cmd --> node["node"]
+        all --> a_b["&lt;backend&gt;.&lt;action&gt;"]
+        group --> g_name["&lt;name&gt;"]
+        g_name --> g_b["&lt;backend&gt;.&lt;action&gt;"]
+        node --> n_id["&lt;id&gt;"]
+        n_id --> n_b["&lt;backend&gt;.&lt;action&gt;"]
+    end
 
-Results (workers → controller):
-  result.<jobID>.<taskIndex>.<nodeID>  Result from a specific node for a specific step
+    subgraph Results ["Results (workers → controller)"]
+        direction TB
+        result["result"]
+        result --> r_job["&lt;jobID&gt;"]
+        r_job --> r_task["&lt;taskIndex&gt;"]
+        r_task --> r_node["&lt;nodeID&gt;"]
+    end
 ```
+
+| Subject Pattern | Usage |
+|-----------------|-------|
+| `cmd.all.<backend>.<action>` | Target every node (barrier broadcast) |
+| `cmd.group.<name>.<backend>.<action>` | Target a group (barrier broadcast) |
+| `cmd.node.<id>.<backend>.<action>` | Target a specific node (barrier or pipeline per-node) |
+| `result.<jobID>.<taskIndex>.<nodeID>` | Result from a specific node for a specific step |
 
 The result subject includes a `taskIndex` segment so that each (job, step, node) triple
 gets a unique subject. This is critical for pipeline phases where a node publishes
@@ -263,12 +287,12 @@ type Result struct {
 }
 ```
 
-Changes from current:
-- `context.Context` for cancellation and timeout propagation
-- Structured `params` instead of a raw string payload
-- `Actions()` for discovery and validation (controller can reject jobs
-  referencing invalid backend/action combinations)
-- Return `*Result` so output flows back through the results stream
+Key design choices:
+- `context.Context` enables cancellation and timeout propagation from the scheduler
+- Structured `params` (not a raw string payload) for safe interpolation and validation
+- `Actions()` enables discovery — the controller can reject jobs referencing
+  invalid backend/action combinations before dispatching
+- `*Result` carries output back through the results stream
 
 ### Example: APT Backend
 
@@ -306,8 +330,8 @@ API calls) don't need this.
 
 ## Controller Scheduler
 
-The scheduler is the new core of the controller. It replaces the current
-"create streams and wait" logic with an active orchestration loop.
+The scheduler is the core of the controller — an active orchestration loop
+that pulls jobs, resolves targets, dispatches commands, and tracks progress.
 
 ### Job State Machine
 
@@ -326,32 +350,41 @@ stateDiagram-v2
 
 ### Job Lifecycle
 
-```
-1. Client submits job via API → published to requests stream
-       │
-2. Scheduler pulls job from requests stream (subject to concurrency limits)
-       │
-3. Scheduler validates phases and resolves target → set of node IDs
-   - Stores Job in KV with status=running, expected=nodeIDs
-       │
-4. Recursive phase walk (executePhases):
-   │
-   ├─ Leaf phase (barrier):
-   │   ├─ Broadcast command: cmd.<scope>.<value>.<backend>.<action>
-   │   ├─ Collect results from all active nodes: result.<jobID>.<taskIndex>.>
-   │   ├─ Apply failure strategy (fail-fast or continue)
-   │   └─ Advance flat step index
-   │
-   ├─ Branch phase (pipeline):
-   │   ├─ Dispatch first sub-step to each node: cmd.node.<nodeID>.<backend>.<action>
-   │   ├─ As each node completes, dispatch its next sub-step immediately
-   │   ├─ Nodes advance independently (no cross-node sync)
-   │   └─ Pipeline completes when all nodes finish or are excluded by strategy
-   │
-   └─ Condition evaluation at each phase:
-       skip if condition not met (on_success/on_failure vs stepFailed state)
-       │
-5. All phases complete → update Job status (completed or failed)
+```mermaid
+flowchart TD
+    Submit["1. Client submits job via API"]
+    Submit --> Publish["Publish to requests stream"]
+    Publish --> Pull["2. Scheduler pulls job<br/>(subject to concurrency limits)"]
+    Pull --> Validate["3. Validate phases, resolve target → node IDs<br/>Store in KV: status=running, expected=nodeIDs"]
+    Validate --> Walk["4. Recursive phase walk<br/>(executePhases)"]
+
+    Walk --> CondCheck{"Evaluate<br/>condition"}
+    CondCheck -- "not met" --> SkipPhase["Skip phase"]
+    SkipPhase --> Walk
+    CondCheck -- "met" --> PhaseType{"Phase type?"}
+
+    PhaseType -- "Leaf" --> Barrier["Barrier Step"]
+    PhaseType -- "Branch" --> Pipeline["Pipeline"]
+
+    subgraph barrier ["Barrier (leaf phase)"]
+        Barrier --> Broadcast["Broadcast command<br/>cmd.&lt;scope&gt;.&lt;value&gt;.&lt;backend&gt;.&lt;action&gt;"]
+        Broadcast --> Collect["Collect results from all active nodes"]
+        Collect --> Strategy["Apply failure strategy<br/>(fail-fast or continue)"]
+        Strategy --> Advance["Advance flat step index"]
+    end
+
+    subgraph pipeline ["Pipeline (branch phase)"]
+        Pipeline --> DispatchAll["Dispatch sub-step 0 to each node<br/>cmd.node.&lt;nodeID&gt;.&lt;backend&gt;.&lt;action&gt;"]
+        DispatchAll --> NodeDone{"Node completes<br/>sub-step?"}
+        NodeDone -- "More sub-steps" --> DispatchNext["Dispatch next sub-step<br/>to that node immediately"]
+        DispatchNext --> NodeDone
+        NodeDone -- "All nodes done<br/>or excluded" --> PipelineDone["Advance flatIndex by<br/>total sub-step count"]
+    end
+
+    Advance --> Walk
+    PipelineDone --> Walk
+
+    Walk -. "All phases done" .-> Final["5. Update Job status<br/>(completed or failed)"]
 ```
 
 ### Scheduler Implementation: Recursive Phase Walker
@@ -377,22 +410,22 @@ The main `execute()` method:
 ```mermaid
 flowchart TD
     Start["executePhases(phases)"] --> Loop["For each phase"]
-    Loop --> CtxCheck{"Context\ncancelled?"}
+    Loop --> CtxCheck{"Context<br/>cancelled?"}
     CtxCheck -- Yes --> Return["Return"]
-    CtxCheck -- No --> NodeCheck{"Active nodes\n> 0?"}
+    CtxCheck -- No --> NodeCheck{"Active nodes<br/>> 0?"}
     NodeCheck -- No --> Return
-    NodeCheck -- Yes --> FFCheck{"failFastTriggered\n&& not on_failure?"}
+    NodeCheck -- Yes --> FFCheck{"failFastTriggered<br/>&& not on_failure?"}
     FFCheck -- Yes --> Skip["Skip phase"]
     Skip --> Loop
-    FFCheck -- No --> CondEval{"Evaluate\ncondition"}
-    CondEval -- "on_success\n&& stepFailed" --> Skip
-    CondEval -- "on_failure\n&& !stepFailed" --> Skip
+    FFCheck -- No --> CondEval{"Evaluate<br/>condition"}
+    CondEval -- "on_success<br/>&& stepFailed" --> Skip
+    CondEval -- "on_failure<br/>&& !stepFailed" --> Skip
     CondEval -- "Condition met" --> TypeCheck{"Phase type?"}
 
-    TypeCheck -- "Leaf" --> Barrier["executeBarrierStep\n→ broadcast, collect,\napply strategy"]
-    TypeCheck -- "Branch" --> Pipeline["executePipeline\n→ per-node dispatch,\nindependent advance"]
+    TypeCheck -- "Leaf" --> Barrier["executeBarrierStep<br/>→ broadcast, collect,<br/>apply strategy"]
+    TypeCheck -- "Branch" --> Pipeline["executePipeline<br/>→ per-node dispatch,<br/>independent advance"]
 
-    Barrier --> UpdateState["Update stepFailed,\nflatIndex, activeNodes"]
+    Barrier --> UpdateState["Update stepFailed,<br/>flatIndex, activeNodes"]
     Pipeline --> UpdateState
     UpdateState --> Loop
 ```
@@ -406,8 +439,7 @@ for each one:
 
 **Barrier step** (`executeBarrierStep`): Broadcasts a command to all active nodes
 via the target scope subject, collects results from all of them, applies the
-failure strategy, and advances `flatIndex` by 1. This is the original execution
-mode, extracted from the old flat loop.
+failure strategy, and advances `flatIndex` by 1.
 
 **Pipeline** (`executePipeline`): Dispatches to each node individually via
 `cmd.node.<nodeID>.<backend>.<action>`. Tracks per-node progress independently.
@@ -454,15 +486,13 @@ The controller can mark nodes as offline if `LastSeen` exceeds a threshold (e.g.
 On graceful shutdown, workers set their status to `"offline"` and stop their
 consumer. On crash, the heartbeat timeout handles it.
 
-## Worker Config Changes
+## Worker Configuration
 
 ```yaml
 worker:
   groups: ["web", "production"]     # group memberships for targeting
   # backends are auto-discovered from the registry by default
 ```
-
-Added to the existing config structure:
 
 ```go
 type WorkerConfig struct {
@@ -476,7 +506,7 @@ type Config struct {
 }
 ```
 
-## CLI Changes
+## CLI Usage
 
 ```bash
 # Submit a single-task job targeting all nodes
@@ -566,7 +596,7 @@ tasks:
 
 Conditions: `always` (default), `on_success`, `on_failure`. Work at any level of the tree.
 
-## API Changes
+## API Endpoints
 
 ```
 POST /job                    Submit a new job
@@ -714,11 +744,11 @@ Key details:
 
 ## Implementation Status
 
-### Phase 1: Core Redesign (Complete)
+### Phase 1: Core (Complete)
 
-Orchestration engine, job model, worker refactor, backend interface, API, CLI.
+Orchestration engine, job model, workers, backend interface, API, CLI.
 
-| Component              | Changes                                                |
+| Component              | Description                                            |
 |------------------------|--------------------------------------------------------|
 | `internal/models`      | Job, Task, Target, TaskResult, NodeInfo types          |
 | `internal/client`      | NATS client: PublishCommand, PublishResult, KV ops     |
@@ -749,11 +779,16 @@ KV safety and worker reliability — prerequisites for multi-controller support.
 - `MaxAckPending: 1` on worker consumers (per-worker FIFO guarantee)
 - Configurable worker intervals (`heartbeat_interval`, `inactive_threshold` in worker config)
 
-### Multi-Controller HA (Not Started)
+### Multi-Controller HA (Complete)
 
-- Controller registration + heartbeat (`controllers` KV bucket)
-- Job ownership (`Owner` field on Job, CAS claiming on pickup)
-- Stale job detection + resumption
+Multiple controllers share a NATS cluster and compete for jobs. No leader election needed.
+
+- Controller registration + heartbeat (`controllers` KV bucket, configurable `heartbeat_interval` and `stale_threshold`)
+- Job ownership (`Owner` field on Job, CAS claiming in `execute()` — first controller to CAS-update wins)
+- Cross-controller cancellation (CAS-cancel in KV; owning controller detects on next `updateJob()` conflict)
+- Stale job recovery (periodic loop detects dead controllers via heartbeat, recovers orphaned running jobs and stale pending jobs)
+- Recovery restarts jobs from step 0 with cleared results (backends should be idempotent)
+- `GET /controllers` API endpoint for cluster visibility
 
 ### Phase 3: Production Hardening (Not Started)
 

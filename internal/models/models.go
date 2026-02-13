@@ -182,6 +182,7 @@ type Job struct {
 	Step      int        `json:"step"`      // current task index
 	Expected  []string   `json:"expected"`  // resolved node IDs
 	Results   JobResults `json:"results,omitempty"`
+	Owner     string     `json:"owner,omitempty"` // controller ID that claimed this job
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
 }
@@ -229,6 +230,15 @@ type NodeInfo struct {
 	Backends  []string  `json:"backends"`
 	Status    string    `json:"status"` // "online" | "offline"
 	LastSeen  time.Time `json:"last_seen"`
+}
+
+// ControllerInfo is self-reported by each controller on startup and via heartbeat.
+type ControllerInfo struct {
+	ID        string    `json:"id"`
+	Hostname  string    `json:"hostname"`
+	Status    string    `json:"status"` // "online" | "offline"
+	LastSeen  time.Time `json:"last_seen"`
+	StartedAt time.Time `json:"started_at"`
 }
 
 // JobFile is the YAML structure for submitting multi-task jobs from a file.

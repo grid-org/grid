@@ -22,7 +22,7 @@ func setupAPI(t *testing.T) (*testutil.TestEnv, *api.API, *scheduler.Scheduler) 
 	env.RegisterNodes(t, testutil.OnlineNode("test-node", "web"))
 
 	reg := registry.New(env.Client)
-	sched := scheduler.New(env.Client, reg, env.Config.Scheduler)
+	sched := scheduler.New(env.Client, reg, env.Config.Scheduler, "")
 	a := api.New(env.Config, env.Client, sched)
 
 	return env, a, sched
@@ -258,7 +258,7 @@ func TestPostJob_429_WhenQueueFull(t *testing.T) {
 	env.Config.Scheduler.MaxConcurrent = 1
 
 	reg := registry.New(env.Client)
-	sched := scheduler.New(env.Client, reg, env.Config.Scheduler)
+	sched := scheduler.New(env.Client, reg, env.Config.Scheduler, "")
 	a := api.New(env.Config, env.Client, sched)
 
 	body := `{"target":{"scope":"all"},"tasks":[{"backend":"test","action":"succeed"}]}`
@@ -282,6 +282,34 @@ func TestPostJob_429_WhenQueueFull(t *testing.T) {
 
 	if rec.Code != http.StatusTooManyRequests {
 		t.Errorf("status = %d, want %d; body: %s", rec.Code, http.StatusTooManyRequests, rec.Body.String())
+	}
+}
+
+func TestListControllers(t *testing.T) {
+	env, a, _ := setupAPI(t)
+
+	// Register a couple of controllers
+	for _, id := range []string{"ctrl-1", "ctrl-2"} {
+		env.Client.PutController(models.ControllerInfo{
+			ID:       id,
+			Hostname: id,
+			Status:   "online",
+		})
+	}
+
+	req := httptest.NewRequest("GET", "/controllers", nil)
+	rec := httptest.NewRecorder()
+
+	a.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var controllers []models.ControllerInfo
+	json.NewDecoder(rec.Body).Decode(&controllers)
+	if len(controllers) != 2 {
+		t.Errorf("len = %d, want 2", len(controllers))
 	}
 }
 

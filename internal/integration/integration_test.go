@@ -208,7 +208,7 @@ func setupCluster(t *testing.T) *testCluster {
 
 	env := testutil.NewTestEnv(t)
 	reg := registry.New(env.Client)
-	sched := scheduler.New(env.Client, reg, env.Config.Scheduler)
+	sched := scheduler.New(env.Client, reg, env.Config.Scheduler, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -512,6 +512,68 @@ func TestE2E_JobList(t *testing.T) {
 
 	if len(jobs) != 3 {
 		t.Errorf("jobs len = %d, want 3", len(jobs))
+	}
+}
+
+func TestE2E_MultiController(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+
+	// Two schedulers with different controller IDs sharing the same NATS
+	reg := registry.New(env.Client)
+	sched1 := scheduler.New(env.Client, reg, env.Config.Scheduler, "ctrl-1")
+	sched2 := scheduler.New(env.Client, reg, env.Config.Scheduler, "ctrl-2")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	if err := sched1.Start(ctx); err != nil {
+		t.Fatalf("starting sched1: %v", err)
+	}
+	if err := sched2.Start(ctx); err != nil {
+		t.Fatalf("starting sched2: %v", err)
+	}
+
+	a := api.New(env.Config, env.Client, sched1)
+	tc := &testCluster{env: env, scheduler: sched1, api: a}
+
+	startTestWorker(t, env, "w1", []string{"web"})
+	startTestWorker(t, env, "w2", []string{"web"})
+	time.Sleep(200 * time.Millisecond)
+
+	// Submit multiple jobs — they'll be distributed across both schedulers
+	totalJobs := 6
+	for i := 0; i < totalJobs; i++ {
+		tc.postJob(t, fmt.Sprintf(`{
+			"target": {"scope": "all"},
+			"tasks": [{"backend": "test", "action": "succeed", "params": {"message": "job-%d"}}]
+		}`, i))
+	}
+
+	// All jobs should complete
+	jobs, err := env.Client.ListJobs()
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+
+	for _, job := range jobs {
+		testutil.WaitFor(t, 15*time.Second, func() bool {
+			j, _, _ := env.Client.GetJob(job.ID)
+			return j.Status == models.JobCompleted
+		}, fmt.Sprintf("job %s should complete", job.ID))
+	}
+
+	// Verify all completed with an owner set
+	jobs, _ = env.Client.ListJobs()
+	for _, job := range jobs {
+		if job.Status != models.JobCompleted {
+			t.Errorf("job %s status = %q, want completed", job.ID, job.Status)
+		}
+		if job.Owner == "" {
+			t.Errorf("job %s has no owner", job.ID)
+		}
+		if job.Owner != "ctrl-1" && job.Owner != "ctrl-2" {
+			t.Errorf("job %s owner = %q, want ctrl-1 or ctrl-2", job.ID, job.Owner)
+		}
 	}
 }
 
