@@ -10,49 +10,58 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// CreateJob stores a new job in the jobs KV bucket.
-func (c *Client) CreateJob(job models.Job) (models.Job, error) {
+// CreateJob stores a new job in the jobs KV bucket using atomic create.
+// Returns the job and its KV revision for subsequent CAS updates.
+func (c *Client) CreateJob(job models.Job) (models.Job, uint64, error) {
 	job.CreatedAt = time.Now().UTC()
 	job.UpdatedAt = job.CreatedAt
 
 	data, err := json.Marshal(job)
 	if err != nil {
-		return job, fmt.Errorf("encoding job: %w", err)
+		return job, 0, fmt.Errorf("encoding job: %w", err)
 	}
 
-	if err := c.PutKV("jobs", job.ID, data); err != nil {
-		return job, fmt.Errorf("storing job: %w", err)
+	rev, err := c.CreateKV("jobs", job.ID, data)
+	if err != nil {
+		return job, 0, fmt.Errorf("storing job: %w", err)
 	}
 
 	log.Info("Job created", "id", job.ID, "target", job.Target, "tasks", len(job.Tasks))
-	return job, nil
+	return job, rev, nil
 }
 
-// UpdateJob updates an existing job in the KV store.
-func (c *Client) UpdateJob(job models.Job) error {
+// UpdateJob performs a CAS update on a job in the KV store.
+// The revision must match the current stored revision; returns the new revision.
+func (c *Client) UpdateJob(job models.Job, revision uint64) (uint64, error) {
 	job.UpdatedAt = time.Now().UTC()
 
 	data, err := json.Marshal(job)
 	if err != nil {
-		return fmt.Errorf("encoding job: %w", err)
+		return 0, fmt.Errorf("encoding job: %w", err)
 	}
 
-	return c.PutKV("jobs", job.ID, data)
+	rev, err := c.UpdateKV("jobs", job.ID, data, revision)
+	if err != nil {
+		return 0, fmt.Errorf("updating job %s: %w", job.ID, err)
+	}
+
+	return rev, nil
 }
 
 // GetJob retrieves a job from the KV store by ID.
-func (c *Client) GetJob(id string) (models.Job, error) {
+// Returns the job and its current KV revision for CAS updates.
+func (c *Client) GetJob(id string) (models.Job, uint64, error) {
 	entry, err := c.GetKV("jobs", id)
 	if err != nil {
-		return models.Job{}, fmt.Errorf("getting job %s: %w", id, err)
+		return models.Job{}, 0, fmt.Errorf("getting job %s: %w", id, err)
 	}
 
 	var job models.Job
 	if err := json.Unmarshal(entry.Value(), &job); err != nil {
-		return models.Job{}, fmt.Errorf("decoding job %s: %w", id, err)
+		return models.Job{}, 0, fmt.Errorf("decoding job %s: %w", id, err)
 	}
 
-	return job, nil
+	return job, entry.Revision(), nil
 }
 
 // ListJobs returns all jobs from the KV store.

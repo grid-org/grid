@@ -153,7 +153,7 @@ func (a *API) cancelJob(ctx echo.Context) error {
 func (a *API) getJob(ctx echo.Context) error {
 	id := ctx.Param("id")
 
-	job, err := a.client.GetJob(id)
+	job, _, err := a.client.GetJob(id)
 	if err != nil {
 		return ctx.JSON(http.StatusNotFound, J{"error": err.Error()})
 	}

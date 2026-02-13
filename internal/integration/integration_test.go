@@ -109,6 +109,7 @@ func startTestWorker(t *testing.T, env *testutil.TestEnv, nodeID string, groups 
 		DeliverPolicy:     jetstream.DeliverNewPolicy,
 		AckPolicy:         jetstream.AckExplicitPolicy,
 		InactiveThreshold: 10 * time.Minute,
+		MaxAckPending:     1,
 	})
 	if err != nil {
 		hbCancel()

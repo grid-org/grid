@@ -67,6 +67,16 @@ func (w *Worker) Start() error {
 	filters := w.buildFilters()
 	log.Debug("Consumer filters", "filters", filters)
 
+	// Parse configurable inactive threshold (default: 10m)
+	inactiveThreshold := 10 * time.Minute
+	if w.config.Worker.InactiveThreshold != "" {
+		if d, err := time.ParseDuration(w.config.Worker.InactiveThreshold); err == nil {
+			inactiveThreshold = d
+		} else {
+			log.Warn("Invalid inactive_threshold, using default", "value", w.config.Worker.InactiveThreshold)
+		}
+	}
+
 	// Create durable consumer
 	consumerName := fmt.Sprintf("worker-%s", w.nodeID)
 	w.consumer, err = w.client.EnsureConsumer(w.stream, jetstream.ConsumerConfig{
@@ -74,7 +84,8 @@ func (w *Worker) Start() error {
 		FilterSubjects:    filters,
 		DeliverPolicy:     jetstream.DeliverNewPolicy,
 		AckPolicy:         jetstream.AckExplicitPolicy,
-		InactiveThreshold: 10 * time.Minute,
+		InactiveThreshold: inactiveThreshold,
+		MaxAckPending:     1, // FIFO: one command at a time per worker
 	})
 	if err != nil {
 		return fmt.Errorf("creating consumer: %w", err)
@@ -145,7 +156,15 @@ func (w *Worker) deregister() {
 }
 
 func (w *Worker) heartbeat(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	interval := 30 * time.Second
+	if w.config.Worker.HeartbeatInterval != "" {
+		if d, err := time.ParseDuration(w.config.Worker.HeartbeatInterval); err == nil {
+			interval = d
+		} else {
+			log.Warn("Invalid heartbeat_interval, using default", "value", w.config.Worker.HeartbeatInterval)
+		}
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {

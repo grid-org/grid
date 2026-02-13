@@ -210,7 +210,7 @@ func TestEnqueue(t *testing.T) {
 	}
 
 	// Verify stored in KV
-	stored, err := env.Client.GetJob("enqueue-1")
+	stored, _, err := env.Client.GetJob("enqueue-1")
 	if err != nil {
 		t.Fatalf("GetJob: %v", err)
 	}
@@ -261,11 +261,11 @@ func TestExecute_SingleTask(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 10*time.Second, func() bool {
-		j, _ := env.Client.GetJob("exec-single")
+		j, _, _ := env.Client.GetJob("exec-single")
 		return j.Status == models.JobCompleted
 	}, "job should complete")
 
-	got, _ := env.Client.GetJob("exec-single")
+	got, _, _ := env.Client.GetJob("exec-single")
 	if len(got.Results) != 1 {
 		t.Fatalf("Results has %d steps, want 1", len(got.Results))
 	}
@@ -304,11 +304,11 @@ func TestExecute_MultiStep(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 15*time.Second, func() bool {
-		j, _ := env.Client.GetJob("exec-multi")
+		j, _, _ := env.Client.GetJob("exec-multi")
 		return j.Status == models.JobCompleted
 	}, "job should complete")
 
-	got, _ := env.Client.GetJob("exec-multi")
+	got, _, _ := env.Client.GetJob("exec-multi")
 	if len(got.Results) != 3 {
 		t.Errorf("Results has %d steps, want 3", len(got.Results))
 	}
@@ -351,11 +351,11 @@ func TestExecute_FailFast(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 10*time.Second, func() bool {
-		j, _ := env.Client.GetJob("exec-failfast")
+		j, _, _ := env.Client.GetJob("exec-failfast")
 		return j.Status == models.JobFailed
 	}, "job should fail")
 
-	got, _ := env.Client.GetJob("exec-failfast")
+	got, _, _ := env.Client.GetJob("exec-failfast")
 	if got.Status != models.JobFailed {
 		t.Errorf("Status = %q, want failed", got.Status)
 	}
@@ -401,11 +401,11 @@ func TestExecute_Continue(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 15*time.Second, func() bool {
-		j, _ := env.Client.GetJob("exec-continue")
+		j, _, _ := env.Client.GetJob("exec-continue")
 		return j.Status == models.JobCompleted || j.Status == models.JobFailed
 	}, "job should finish")
 
-	got, _ := env.Client.GetJob("exec-continue")
+	got, _, _ := env.Client.GetJob("exec-continue")
 	if got.Status != models.JobCompleted {
 		t.Errorf("Status = %q, want completed", got.Status)
 	}
@@ -443,7 +443,7 @@ func TestCancel_Pending(t *testing.T) {
 		t.Error("Cancel should return true for pending job")
 	}
 
-	got, _ := env.Client.GetJob("cancel-pending")
+	got, _, _ := env.Client.GetJob("cancel-pending")
 	if got.Status != models.JobCancelled {
 		t.Errorf("Status = %q, want cancelled", got.Status)
 	}
@@ -477,7 +477,7 @@ func TestCancel_Running(t *testing.T) {
 
 	// Wait for job to be picked up
 	testutil.WaitFor(t, 5*time.Second, func() bool {
-		j, _ := env.Client.GetJob("cancel-running")
+		j, _, _ := env.Client.GetJob("cancel-running")
 		return j.Status == models.JobRunning
 	}, "job should start running")
 
@@ -490,7 +490,7 @@ func TestCancel_Running(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 5*time.Second, func() bool {
-		j, _ := env.Client.GetJob("cancel-running")
+		j, _, _ := env.Client.GetJob("cancel-running")
 		return j.Status == models.JobCancelled
 	}, "job should become cancelled")
 }
@@ -525,7 +525,7 @@ func TestExecute_TaskTimeout(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 10*time.Second, func() bool {
-		j, _ := env.Client.GetJob("exec-timeout")
+		j, _, _ := env.Client.GetJob("exec-timeout")
 		return j.Status == models.JobFailed || j.Status == models.JobCancelled
 	}, "job should fail from timeout")
 }
@@ -625,11 +625,11 @@ func TestExecute_Retry(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 30*time.Second, func() bool {
-		j, _ := env.Client.GetJob("exec-retry")
+		j, _, _ := env.Client.GetJob("exec-retry")
 		return j.Status == models.JobCompleted || j.Status == models.JobFailed
 	}, "job should finish")
 
-	got, _ := env.Client.GetJob("exec-retry")
+	got, _, _ := env.Client.GetJob("exec-retry")
 	if got.Status != models.JobCompleted {
 		t.Errorf("Status = %q, want completed", got.Status)
 	}
@@ -703,11 +703,11 @@ func TestConditionOnSuccess_SkipsOnFailure(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 10*time.Second, func() bool {
-		j, _ := env.Client.GetJob("cond-onsuccess-skip")
+		j, _, _ := env.Client.GetJob("cond-onsuccess-skip")
 		return j.Status == models.JobCompleted || j.Status == models.JobFailed
 	}, "job should finish")
 
-	got, _ := env.Client.GetJob("cond-onsuccess-skip")
+	got, _, _ := env.Client.GetJob("cond-onsuccess-skip")
 
 	// Step 1 should be skipped for remaining active node (n1)
 	if nr, ok := got.Results["1"]["n1"]; !ok {
@@ -759,11 +759,11 @@ func TestConditionOnFailure_RunsCleanup(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 10*time.Second, func() bool {
-		j, _ := env.Client.GetJob("cond-onfailure-runs")
+		j, _, _ := env.Client.GetJob("cond-onfailure-runs")
 		return j.Status == models.JobCompleted || j.Status == models.JobFailed
 	}, "job should finish")
 
-	got, _ := env.Client.GetJob("cond-onfailure-runs")
+	got, _, _ := env.Client.GetJob("cond-onfailure-runs")
 	if got.Status != models.JobFailed {
 		t.Errorf("Status = %q, want failed", got.Status)
 	}
@@ -805,11 +805,11 @@ func TestConditionOnFailure_SkippedOnSuccess(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 10*time.Second, func() bool {
-		j, _ := env.Client.GetJob("cond-onfailure-skip")
+		j, _, _ := env.Client.GetJob("cond-onfailure-skip")
 		return j.Status == models.JobCompleted || j.Status == models.JobFailed
 	}, "job should finish")
 
-	got, _ := env.Client.GetJob("cond-onfailure-skip")
+	got, _, _ := env.Client.GetJob("cond-onfailure-skip")
 	if got.Status != models.JobCompleted {
 		t.Errorf("Status = %q, want completed", got.Status)
 	}
@@ -858,11 +858,11 @@ func TestFailFast_StillRunsOnFailureTasks(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 10*time.Second, func() bool {
-		j, _ := env.Client.GetJob("failfast-onfailure")
+		j, _, _ := env.Client.GetJob("failfast-onfailure")
 		return j.Status == models.JobFailed
 	}, "job should fail")
 
-	got, _ := env.Client.GetJob("failfast-onfailure")
+	got, _, _ := env.Client.GetJob("failfast-onfailure")
 	if got.Status != models.JobFailed {
 		t.Errorf("Status = %q, want failed", got.Status)
 	}
@@ -912,11 +912,11 @@ func TestConditionDefault_IsAlways(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 10*time.Second, func() bool {
-		j, _ := env.Client.GetJob("cond-default")
+		j, _, _ := env.Client.GetJob("cond-default")
 		return j.Status == models.JobCompleted
 	}, "job should complete")
 
-	got, _ := env.Client.GetJob("cond-default")
+	got, _, _ := env.Client.GetJob("cond-default")
 	if got.Status != models.JobCompleted {
 		t.Errorf("Status = %q, want completed", got.Status)
 	}
@@ -1007,7 +1007,7 @@ func TestMaxConcurrent_LimitsParallelJobs(t *testing.T) {
 	time.Sleep(1 * time.Second)
 	runningCount := 0
 	for i := 0; i < totalJobs; i++ {
-		j, err := env.Client.GetJob(fmt.Sprintf("concurrent-%d", i))
+		j, _, err := env.Client.GetJob(fmt.Sprintf("concurrent-%d", i))
 		if err != nil {
 			continue
 		}
@@ -1060,13 +1060,13 @@ func TestConcurrentJobs_CompleteIndependently(t *testing.T) {
 	for i := 0; i < totalJobs; i++ {
 		id := fmt.Sprintf("indep-%d", i)
 		testutil.WaitFor(t, 15*time.Second, func() bool {
-			j, _ := env.Client.GetJob(id)
+			j, _, _ := env.Client.GetJob(id)
 			return j.Status == models.JobCompleted
 		}, fmt.Sprintf("job %s should complete", id))
 	}
 
 	for i := 0; i < totalJobs; i++ {
-		got, _ := env.Client.GetJob(fmt.Sprintf("indep-%d", i))
+		got, _, _ := env.Client.GetJob(fmt.Sprintf("indep-%d", i))
 		if got.Status != models.JobCompleted {
 			t.Errorf("job indep-%d status = %q, want completed", i, got.Status)
 		}
@@ -1215,11 +1215,11 @@ func TestPipeline_SingleNode(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 15*time.Second, func() bool {
-		j, _ := env.Client.GetJob("pipe-single")
+		j, _, _ := env.Client.GetJob("pipe-single")
 		return j.Status == models.JobCompleted
 	}, "pipeline job should complete")
 
-	got, _ := env.Client.GetJob("pipe-single")
+	got, _, _ := env.Client.GetJob("pipe-single")
 	if got.Status != models.JobCompleted {
 		t.Fatalf("Status = %q, want completed", got.Status)
 	}
@@ -1266,11 +1266,11 @@ func TestPipeline_MultiNode(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 15*time.Second, func() bool {
-		j, _ := env.Client.GetJob("pipe-multi")
+		j, _, _ := env.Client.GetJob("pipe-multi")
 		return j.Status == models.JobCompleted
 	}, "multi-node pipeline should complete")
 
-	got, _ := env.Client.GetJob("pipe-multi")
+	got, _, _ := env.Client.GetJob("pipe-multi")
 	if got.Status != models.JobCompleted {
 		t.Fatalf("Status = %q, want completed", got.Status)
 	}
@@ -1316,11 +1316,11 @@ func TestPipeline_NodeFailure_Continue(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 15*time.Second, func() bool {
-		j, _ := env.Client.GetJob("pipe-continue")
+		j, _, _ := env.Client.GetJob("pipe-continue")
 		return j.Status == models.JobCompleted || j.Status == models.JobFailed
 	}, "pipeline with continue should finish")
 
-	got, _ := env.Client.GetJob("pipe-continue")
+	got, _, _ := env.Client.GetJob("pipe-continue")
 	if got.Status != models.JobCompleted {
 		t.Errorf("Status = %q, want completed", got.Status)
 	}
@@ -1375,11 +1375,11 @@ func TestPipeline_NodeFailure_FailFast(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 15*time.Second, func() bool {
-		j, _ := env.Client.GetJob("pipe-failfast")
+		j, _, _ := env.Client.GetJob("pipe-failfast")
 		return j.Status == models.JobFailed
 	}, "pipeline with fail-fast should fail")
 
-	got, _ := env.Client.GetJob("pipe-failfast")
+	got, _, _ := env.Client.GetJob("pipe-failfast")
 	if got.Status != models.JobFailed {
 		t.Errorf("Status = %q, want failed", got.Status)
 	}
@@ -1418,11 +1418,11 @@ func TestMixed_BarrierAndPipeline(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 15*time.Second, func() bool {
-		j, _ := env.Client.GetJob("mixed-barrier-pipe")
+		j, _, _ := env.Client.GetJob("mixed-barrier-pipe")
 		return j.Status == models.JobCompleted
 	}, "mixed job should complete")
 
-	got, _ := env.Client.GetJob("mixed-barrier-pipe")
+	got, _, _ := env.Client.GetJob("mixed-barrier-pipe")
 	if got.Status != models.JobCompleted {
 		t.Fatalf("Status = %q, want completed", got.Status)
 	}
@@ -1485,11 +1485,11 @@ func TestPipeline_Condition_Skipped(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 10*time.Second, func() bool {
-		j, _ := env.Client.GetJob("pipe-cond-skip")
+		j, _, _ := env.Client.GetJob("pipe-cond-skip")
 		return j.Status == models.JobCompleted
 	}, "job should complete")
 
-	got, _ := env.Client.GetJob("pipe-cond-skip")
+	got, _, _ := env.Client.GetJob("pipe-cond-skip")
 	if got.Status != models.JobCompleted {
 		t.Fatalf("Status = %q, want completed", got.Status)
 	}
@@ -1549,11 +1549,11 @@ func TestPipeline_Condition_OnFailure(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 10*time.Second, func() bool {
-		j, _ := env.Client.GetJob("pipe-cond-onfail")
+		j, _, _ := env.Client.GetJob("pipe-cond-onfail")
 		return j.Status == models.JobFailed
 	}, "job should fail")
 
-	got, _ := env.Client.GetJob("pipe-cond-onfail")
+	got, _, _ := env.Client.GetJob("pipe-cond-onfail")
 	if got.Status != models.JobFailed {
 		t.Fatalf("Status = %q, want failed", got.Status)
 	}
@@ -1661,11 +1661,11 @@ func TestPipeline_WithRetry(t *testing.T) {
 	}
 
 	testutil.WaitFor(t, 30*time.Second, func() bool {
-		j, _ := env.Client.GetJob("pipe-retry")
+		j, _, _ := env.Client.GetJob("pipe-retry")
 		return j.Status == models.JobCompleted || j.Status == models.JobFailed
 	}, "pipeline retry job should finish")
 
-	got, _ := env.Client.GetJob("pipe-retry")
+	got, _, _ := env.Client.GetJob("pipe-retry")
 	if got.Status != models.JobCompleted {
 		t.Errorf("Status = %q, want completed", got.Status)
 	}

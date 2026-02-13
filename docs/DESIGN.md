@@ -741,13 +741,13 @@ Orchestration engine, job model, worker refactor, backend interface, API, CLI.
 - Job queuing and admission control (`max_concurrent`, `max_pending`)
 - Hierarchical execution model (Phase type, barrier + pipeline execution)
 
-### HA Foundation (Not Started)
+### HA Foundation (Complete)
 
 KV safety and worker reliability — prerequisites for multi-controller support.
 
-- KV CAS for job updates (replace blind `Put()` with revision-tracked `Update()`)
+- KV CAS for job updates (`CreateKV`/`UpdateKV` with revision tracking, `updateJob` helper with conflict detection)
 - `MaxAckPending: 1` on worker consumers (per-worker FIFO guarantee)
-- Configurable `InactiveThreshold` on worker consumers (currently hardcoded 10m)
+- Configurable worker intervals (`heartbeat_interval`, `inactive_threshold` in worker config)
 
 ### Multi-Controller HA (Not Started)
 
