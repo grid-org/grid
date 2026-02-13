@@ -17,6 +17,7 @@
 - **Multi-controller HA** — multiple controllers share a NATS cluster, compete for jobs via CAS, and recover each other's orphaned work
 - **Stale job recovery** — dead controller detection via heartbeat, automatic re-queuing of orphaned jobs
 - **Extensible backend system** — `apt`, `systemd`, `rke2`, `ping`, and `test` backends included
+- **Web dashboard** — single-page operations dashboard with real-time job monitoring, cluster health, and NATS server stats
 - **Embedded NATS** — each controller runs an in-process NATS server; cluster mode for multi-controller deployments
 
 ## Architecture
@@ -118,11 +119,16 @@ task
 # Run with Docker Compose (1 controller, 2 workers)
 docker compose up --build
 
+# Open the dashboard
+open http://localhost:8765/
+
 # Run scenario tests
 task scenario -- scenarios/jobs/smoke-test.yaml
 ```
 
 Binaries are output to `bin/`: `grid` (controller), `gridw` (worker), `gridc` (CLI).
+
+The web dashboard is served automatically at the controller's API address (default `http://localhost:8765/`).
 
 ## Job Specification
 
@@ -255,6 +261,7 @@ Set the controller address with `-a` or `GRID_API` environment variable (default
 | `GET` | `/nodes` | List registered nodes |
 | `GET` | `/node/:id` | Get node details |
 | `GET` | `/controllers` | List registered controllers |
+| `GET` | `/nats` | NATS server stats (Varz) |
 | `GET` | `/status` | Cluster status |
 
 ### Example: Submit a job
@@ -379,6 +386,10 @@ internal/
   worker/         Worker agent (registration, heartbeat, task execution)
     backends/     Backend implementations
   integration/    End-to-end integration tests
+web/
+  index.html        Dashboard SPA shell
+  app.js            Vue 3 app (views, modals, polling, API client)
+  style.css         Dark theme and layout
 scenarios/
   compose.yaml    Docker Compose topology
   configs/        Per-role config files

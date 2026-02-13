@@ -46,6 +46,10 @@ internal/
   scheduler/            Orchestration engine (job execution, retries, cancellation)
   worker/               Worker agent (registration, heartbeat, task execution)
     backends/           Backend interface + implementations (apt, systemd, rke2, ping, test)
+web/
+  index.html            Dashboard SPA shell (Vue 3 CDN)
+  app.js                Vue 3 app — views, modals, polling, API client
+  style.css             Dark theme, responsive layout, phase tree styles
 docs/
   DESIGN.md             Architecture, data model, NATS topology, implementation phases
 scenarios/
@@ -60,8 +64,9 @@ scenarios/
 - **Backend interface**: `Run(ctx, action, params) (*Result, error)` + `Actions() []string`. Backends register via `init()` + `registerBackend()` in their source files.
 - **NATS subjects**: `cmd.<scope>.<value>.<backend>.<action>` for commands, `result.<jobID>.<nodeID>` for results.
 - **Streams**: `commands` (LimitsPolicy), `results` (LimitsPolicy), `requests` (WorkQueuePolicy).
-- **KV buckets**: `jobs`, `nodes`, `cluster`.
+- **KV buckets**: `jobs`, `nodes`, `cluster`, `controllers`.
 - **Job execution**: Scheduler pulls from `requests` stream, resolves targets via registry, dispatches commands step-by-step, collects results via ephemeral consumers.
+- **Web dashboard**: Static files in `web/` served by Echo at `/`. Vue 3 via CDN, no build step. CORS middleware enabled for local dev. `GET /nats` exposes embedded NATS Varz via `API.SetNATSServer()`.
 - **Config**: YAML-based (`github.com/goccy/go-yaml`). Config struct in `internal/config/config.go`. Worker groups set in `worker.groups`.
 
 ## Dependencies
