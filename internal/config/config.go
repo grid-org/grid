@@ -58,6 +58,7 @@ type WorkerConfig struct {
 	Groups            []string `yaml:"groups"`
 	HeartbeatInterval string   `yaml:"heartbeat_interval"` // e.g. "30s" (default)
 	InactiveThreshold string   `yaml:"inactive_threshold"` // e.g. "10m" (default)
+	AllowedPaths      []string `yaml:"allowed_paths"`      // filesystem paths backends may access
 }
 
 type SchedulerConfig struct {

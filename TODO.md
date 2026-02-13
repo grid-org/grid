@@ -1,46 +1,30 @@
 # TODO
 
-## Phase 2 Complete
+## Completed
 
-- [x] Configurable failure strategies (fail-fast, continue)
-- [x] Per-job and per-task timeouts
-- [x] Retry with exponential backoff (`max_retries`)
-- [x] Job cancellation (`POST /job/:id/cancel`)
-- [x] Result persistence with attempts tracking
-- [x] Conditional task execution (`always`, `on_success`, `on_failure`)
-- [x] Job queuing and admission control (`max_concurrent`, `max_pending`, HTTP 429)
+- [x] Phase 1: Core Redesign (orchestration engine, job model, worker refactor, backend interface, API, CLI)
+- [x] Phase 2: Production Orchestration (failure strategies, timeouts, retries, cancellation, result persistence)
+- [x] Hierarchical Execution Model (Phase type, barrier + pipeline execution, recursive tree walker)
+- [x] HA Foundation (KV CAS, worker FIFO, configurable intervals)
+- [x] Multi-Controller HA (job ownership, recovery, cross-controller cancellation)
+- [x] Web Dashboard (Vue 3 SPA, NATS monitoring, cluster views)
+- [x] Backend Expansion: 12 new backends, ~70 new actions (sysinfo, file, net, proc, journald, health, cert, dns, user, firewall, config, package)
 
-## Up Next: HA Foundation
+## Up Next: Backend Library Integration
 
-KV safety and worker reliability — prerequisites for multi-controller support.
+Adopt well-tested Go libraries to replace shell-outs and hand-rolled parsing in new backends.
 
-- [ ] KV CAS for job updates (replace blind `Put()` with revision-tracked `Update()`)
-- [ ] `MaxAckPending: 1` on worker consumers (per-worker FIFO ordering guarantee)
-- [ ] Configurable `InactiveThreshold` on worker consumers (currently hardcoded 10m)
+- [ ] `miekg/dns` — Rewrite dns backend with proper record-type queries + TTLs
+- [ ] `prometheus-community/pro-bing` — Rewrite net ping action with structured ICMP stats (RTT min/avg/max/stddev, packet loss %)
+- [ ] `pelletier/go-toml/v2` — Add TOML format support to config backend
+- [ ] `go-ini/ini` — Replace hand-rolled INI parser in config backend
 
-## Multi-Controller HA
+## Deferred
 
-Requires HA Foundation. Enables running multiple controllers for failover and load balancing.
-
-- [ ] Controller registration + heartbeat (`controllers` KV bucket)
-- [ ] Job ownership (`Owner` field on Job, CAS claiming on pickup)
-- [ ] Stale job detection (startup scan of `running` jobs, check owner liveness)
-- [ ] Job resumption (pick up from last completed step using persisted results + stream replay)
-
-## Hierarchical Execution Model
-
-New job spec format that uses YAML nesting to express execution semantics.
-
-- [x] `Phase` type: recursive tree (leaf = single Task, branch = `tasks` list)
-- [x] Top-level list items are barrier-synchronized phases (all nodes sync between them)
-- [x] Nested `tasks` blocks are per-node pipelines (no inter-node sync between sub-steps)
-- [ ] `sync` scope on barriers: `all` (default), `group`, `none` (deferred — can be added to Phase later)
-- [x] Scheduler becomes recursive tree walker instead of flat loop
-- [x] Conditions (`on_failure`, etc.) work at any level of the tree
+- [ ] `sync` scope on barriers: `all` (default), `group`, `none`
+- [ ] Container backend (separate effort)
 
 ## Phase 3: Production Hardening
-
-Independent of HA and execution model work.
 
 - [ ] mTLS between all components
 - [ ] Token auth with NATS accounts + NKeys
