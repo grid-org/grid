@@ -38,6 +38,14 @@ type Scheduler struct {
 	maxPending int
 }
 
+// execState tracks mutable execution state across a job's phase tree.
+type execState struct {
+	activeNodes       []string
+	flatIndex         int
+	stepFailed        bool
+	failFastTriggered bool
+}
+
 func New(c *client.Client, reg *registry.Registry, cfg config.SchedulerConfig) *Scheduler {
 	if cfg.MaxConcurrent <= 0 {
 		cfg.MaxConcurrent = 5
@@ -229,6 +237,102 @@ func ShouldExecute(condition models.Condition, previousFailed bool) bool {
 	}
 }
 
+func (s *Scheduler) execute(ctx context.Context, job models.Job) {
+	leafCount := models.PhaseLeafCount(job.Tasks)
+	log.Info("Executing job", "id", job.ID, "phases", len(job.Tasks), "leaves", leafCount, "nodes", len(job.Expected), "strategy", job.Strategy)
+
+	job.Status = models.JobRunning
+	if err := s.client.UpdateJob(job); err != nil {
+		log.Error("Failed to update job status", "id", job.ID, "error", err)
+		return
+	}
+
+	state := &execState{
+		activeNodes: make([]string, len(job.Expected)),
+	}
+	copy(state.activeNodes, job.Expected)
+
+	s.executePhases(ctx, &job, job.Tasks, state)
+
+	// If the job was already set to a terminal status by a sub-method, respect it
+	if job.Status == models.JobCancelled || job.Status == models.JobFailed {
+		log.Info("Job done", "id", job.ID, "status", job.Status)
+		return
+	}
+
+	if ctx.Err() != nil {
+		job.Status = models.JobCancelled
+		s.client.UpdateJob(job)
+		log.Info("Job done", "id", job.ID, "status", job.Status)
+		return
+	}
+
+	if state.failFastTriggered {
+		job.Status = models.JobFailed
+	} else {
+		job.Status = models.JobCompleted
+	}
+	if err := s.client.UpdateJob(job); err != nil {
+		log.Error("Failed to mark job done", "id", job.ID, "error", err)
+	}
+	log.Info("Job done", "id", job.ID, "status", job.Status)
+}
+
+// executePhases walks a list of phases (barrier-synchronized at this level).
+func (s *Scheduler) executePhases(ctx context.Context, job *models.Job, phases []models.Phase, state *execState) {
+	for _, phase := range phases {
+		if ctx.Err() != nil {
+			log.Info("Job cancelled or timed out", "job", job.ID, "flatIndex", state.flatIndex)
+			job.Status = models.JobCancelled
+			s.client.UpdateJob(*job)
+			return
+		}
+
+		if len(state.activeNodes) == 0 {
+			log.Info("No active nodes remaining", "job", job.ID)
+			job.Status = models.JobFailed
+			s.client.UpdateJob(*job)
+			return
+		}
+
+		// Evaluate phase condition
+		if state.failFastTriggered {
+			if phase.Condition != models.ConditionOnFailure {
+				log.Info("Skipping phase (fail-fast triggered)", "job", job.ID, "flatIndex", state.flatIndex, "condition", phase.Condition)
+				s.storeSkippedPhase(job, phase, state)
+				continue
+			}
+		} else if !ShouldExecute(phase.Condition, state.stepFailed) {
+			log.Info("Skipping phase (condition not met)", "job", job.ID, "flatIndex", state.flatIndex, "condition", phase.Condition)
+			s.storeSkippedPhase(job, phase, state)
+			continue
+		}
+
+		if phase.IsLeaf() {
+			s.executeBarrierStep(ctx, job, phase, state)
+		} else {
+			s.executePipeline(ctx, job, phase, state)
+		}
+
+		// Check if job was cancelled/failed during execution
+		if job.Status == models.JobCancelled || job.Status == models.JobFailed {
+			return
+		}
+	}
+}
+
+// storeSkippedPhase writes skipped results for all leaves in a phase (recursive for pipelines).
+func (s *Scheduler) storeSkippedPhase(job *models.Job, phase models.Phase, state *execState) {
+	if phase.IsLeaf() {
+		s.storeSkippedResults(job, state.flatIndex, state.activeNodes)
+		state.flatIndex++
+	} else {
+		for _, sub := range phase.Tasks {
+			s.storeSkippedPhase(job, sub, state)
+		}
+	}
+}
+
 // storeSkippedResults writes synthetic "skipped" results for all active nodes at a step.
 func (s *Scheduler) storeSkippedResults(job *models.Job, step int, activeNodes []string) {
 	stepKey := strconv.Itoa(step)
@@ -245,190 +349,380 @@ func (s *Scheduler) storeSkippedResults(job *models.Job, step int, activeNodes [
 	s.client.UpdateJob(*job)
 }
 
-func (s *Scheduler) execute(ctx context.Context, job models.Job) {
-	log.Info("Executing job", "id", job.ID, "tasks", len(job.Tasks), "nodes", len(job.Expected), "strategy", job.Strategy)
+// executeBarrierStep dispatches a leaf phase to all active nodes via broadcast,
+// collects results, and applies the failure strategy. This is the standard
+// barrier-synchronized execution mode.
+func (s *Scheduler) executeBarrierStep(ctx context.Context, job *models.Job, phase models.Phase, state *execState) {
+	task := phase.ToTask()
+	stepIndex := state.flatIndex
 
-	job.Status = models.JobRunning
-	if err := s.client.UpdateJob(job); err != nil {
-		log.Error("Failed to update job status", "id", job.ID, "error", err)
+	job.Step = stepIndex
+	if err := s.client.UpdateJob(*job); err != nil {
+		log.Error("Failed to update job step", "id", job.ID, "error", err)
+	}
+
+	log.Info("Dispatching barrier task", "job", job.ID, "step", stepIndex, "backend", task.Backend, "action", task.Action, "nodes", len(state.activeNodes))
+
+	// Determine task timeout
+	taskTimeout := DefaultTaskTimeout
+	if task.Timeout != "" {
+		if d, err := time.ParseDuration(task.Timeout); err == nil {
+			taskTimeout = d
+		}
+	}
+
+	// Retry loop: attempt the task up to 1 + MaxRetries times
+	maxAttempts := 1 + task.MaxRetries
+	var results []models.TaskResult
+	var lastErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			// Exponential backoff: 2^(attempt-2) seconds, capped at 30s
+			backoff := time.Duration(1<<uint(attempt-2)) * time.Second
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+			log.Info("Retrying task", "job", job.ID, "step", stepIndex, "attempt", attempt, "backoff", backoff)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				job.Status = models.JobCancelled
+				s.client.UpdateJob(*job)
+				return
+			}
+
+			// Re-dispatch command for retry
+			if err := s.client.PublishCommand(job.ID, stepIndex, job.Target, task); err != nil {
+				log.Error("Failed to publish retry command", "job", job.ID, "step", stepIndex, "error", err)
+				job.Status = models.JobFailed
+				s.client.UpdateJob(*job)
+				return
+			}
+		} else {
+			// First attempt: publish command
+			if err := s.client.PublishCommand(job.ID, stepIndex, job.Target, task); err != nil {
+				log.Error("Failed to publish command", "job", job.ID, "step", stepIndex, "error", err)
+				job.Status = models.JobFailed
+				s.client.UpdateJob(*job)
+				return
+			}
+		}
+
+		// Collect results for this step
+		var err error
+		results, err = s.collectResults(ctx, job.ID, stepIndex, state.activeNodes, taskTimeout)
+		if err != nil {
+			if ctx.Err() != nil {
+				log.Info("Job cancelled during result collection", "job", job.ID, "step", stepIndex)
+				job.Status = models.JobCancelled
+			} else {
+				log.Error("Result collection failed", "job", job.ID, "step", stepIndex, "error", err)
+				job.Status = models.JobFailed
+			}
+			s.client.UpdateJob(*job)
+			return
+		}
+
+		// Check if any nodes failed
+		anyFailed := false
+		for _, r := range results {
+			if r.Status == models.ResultFailed {
+				anyFailed = true
+				break
+			}
+		}
+
+		if !anyFailed {
+			// All succeeded, store and move on
+			s.storeResults(job, stepIndex, results, attempt)
+			lastErr = nil
+			break
+		}
+
+		// There were failures
+		if attempt < maxAttempts {
+			lastErr = fmt.Errorf("failures on attempt %d", attempt)
+			continue // retry
+		}
+
+		// Final attempt with failures — store and apply strategy
+		s.storeResults(job, stepIndex, results, attempt)
+		lastErr = fmt.Errorf("failures after %d attempts", maxAttempts)
+	}
+
+	log.Info("Barrier step complete", "job", job.ID, "step", stepIndex, "results", len(results))
+	state.flatIndex++
+
+	if lastErr != nil {
+		state.stepFailed = true
+
+		// Apply failure strategy on final failure
+		for _, r := range results {
+			if r.Status == models.ResultFailed {
+				if job.Strategy == models.StrategyContinue {
+					for j, id := range state.activeNodes {
+						if id == r.NodeID {
+							state.activeNodes = append(state.activeNodes[:j], state.activeNodes[j+1:]...)
+							break
+						}
+					}
+					log.Info("Node failed, continuing", "job", job.ID, "node", r.NodeID)
+				} else {
+					log.Info("Node failed, fail-fast triggered", "job", job.ID, "node", r.NodeID)
+					state.failFastTriggered = true
+				}
+			}
+		}
+
+		if len(state.activeNodes) == 0 {
+			job.Status = models.JobFailed
+			s.client.UpdateJob(*job)
+			return
+		}
+	}
+}
+
+// executePipeline dispatches a pipeline phase (branch) to each node independently.
+// Each node advances through sub-steps at its own pace without waiting for other nodes.
+func (s *Scheduler) executePipeline(ctx context.Context, job *models.Job, phase models.Phase, state *execState) {
+	subPhases := phase.Tasks
+	startIndex := state.flatIndex
+
+	log.Info("Dispatching pipeline", "job", job.ID, "startIndex", startIndex, "subSteps", len(subPhases), "nodes", len(state.activeNodes))
+
+	// Per-node progress tracking
+	type nodeProgress struct {
+		currentStep int
+		retries     int
+		done        bool
+		failed      bool
+	}
+	progress := make(map[string]*nodeProgress, len(state.activeNodes))
+	for _, nodeID := range state.activeNodes {
+		progress[nodeID] = &nodeProgress{}
+	}
+
+	// Create ephemeral consumer for pipeline results BEFORE dispatching
+	stream, err := s.client.GetStream("results")
+	if err != nil {
+		log.Error("Failed to get results stream for pipeline", "job", job.ID, "error", err)
+		job.Status = models.JobFailed
+		s.client.UpdateJob(*job)
 		return
 	}
 
-	// Track active nodes (for continue strategy, failed nodes are excluded)
-	activeNodes := make([]string, len(job.Expected))
-	copy(activeNodes, job.Expected)
+	filterSubject := fmt.Sprintf("result.%s.>", job.ID)
+	consumerName := fmt.Sprintf("sched-pipe-%s-%d", job.ID, startIndex)
+	consumer, err := s.client.EnsureConsumer(stream, jetstream.ConsumerConfig{
+		Name:           consumerName,
+		FilterSubjects: []string{filterSubject},
+		DeliverPolicy:  jetstream.DeliverLastPerSubjectPolicy,
+		AckPolicy:      jetstream.AckExplicitPolicy,
+	})
+	if err != nil {
+		log.Error("Failed to create pipeline consumer", "job", job.ID, "error", err)
+		job.Status = models.JobFailed
+		s.client.UpdateJob(*job)
+		return
+	}
+	defer s.client.DeleteConsumer(stream, consumerName)
 
-	// Track whether any prior step has failed (for conditional execution)
-	stepFailed := false
-	// Track whether fail-fast has been triggered (allows on_failure tasks to still run)
-	failFastTriggered := false
-
-	for i, task := range job.Tasks {
-		// Check for cancellation
-		if ctx.Err() != nil {
-			log.Info("Job cancelled or timed out", "job", job.ID, "step", i)
-			job.Status = models.JobCancelled
-			s.client.UpdateJob(job)
-			return
-		}
-
-		if len(activeNodes) == 0 {
-			log.Info("No active nodes remaining", "job", job.ID)
+	// Dispatch first sub-step to all active nodes
+	firstTask := subPhases[0].ToTask()
+	for _, nodeID := range state.activeNodes {
+		if err := s.client.PublishCommandToNode(job.ID, startIndex, nodeID, firstTask); err != nil {
+			log.Error("Failed to dispatch pipeline step to node", "job", job.ID, "node", nodeID, "error", err)
 			job.Status = models.JobFailed
-			s.client.UpdateJob(job)
+			s.client.UpdateJob(*job)
+			return
+		}
+	}
+
+	// Determine timeout for the whole pipeline (use max of sub-step timeouts, or default)
+	pipelineTimeout := DefaultTaskTimeout
+	for _, sub := range subPhases {
+		if sub.Timeout != "" {
+			if d, err := time.ParseDuration(sub.Timeout); err == nil && d > pipelineTimeout {
+				pipelineTimeout = d
+			}
+		}
+	}
+	// Scale timeout by number of sub-steps
+	pipelineTimeout = pipelineTimeout * time.Duration(len(subPhases))
+
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, pipelineTimeout)
+	defer timeoutCancel()
+
+	// Result collection loop
+	for {
+		// Check if all nodes are done
+		allDone := true
+		for _, np := range progress {
+			if !np.done {
+				allDone = false
+				break
+			}
+		}
+		if allDone {
+			break
+		}
+
+		if timeoutCtx.Err() != nil {
+			if ctx.Err() != nil {
+				log.Info("Job cancelled during pipeline", "job", job.ID)
+				job.Status = models.JobCancelled
+			} else {
+				log.Error("Pipeline timed out", "job", job.ID)
+				job.Status = models.JobFailed
+			}
+			s.client.UpdateJob(*job)
 			return
 		}
 
-		// Evaluate task condition
-		if failFastTriggered {
-			// After fail-fast, only on_failure tasks may run
-			if task.Condition != models.ConditionOnFailure {
-				log.Info("Skipping task (fail-fast triggered)", "job", job.ID, "step", i, "condition", task.Condition)
-				s.storeSkippedResults(&job, i, activeNodes)
-				continue
+		msgs, fetchErr := consumer.Fetch(1, jetstream.FetchMaxWait(2*time.Second))
+		if fetchErr != nil {
+			if timeoutCtx.Err() != nil {
+				if ctx.Err() != nil {
+					job.Status = models.JobCancelled
+				} else {
+					job.Status = models.JobFailed
+				}
+				s.client.UpdateJob(*job)
+				return
 			}
-		} else if !ShouldExecute(task.Condition, stepFailed) {
-			log.Info("Skipping task (condition not met)", "job", job.ID, "step", i, "condition", task.Condition)
-			s.storeSkippedResults(&job, i, activeNodes)
 			continue
 		}
 
-		job.Step = i
-		if err := s.client.UpdateJob(job); err != nil {
-			log.Error("Failed to update job step", "id", job.ID, "error", err)
-		}
-
-		log.Info("Dispatching task", "job", job.ID, "step", i, "backend", task.Backend, "action", task.Action, "nodes", len(activeNodes))
-
-		// Determine task timeout
-		taskTimeout := DefaultTaskTimeout
-		if task.Timeout != "" {
-			if d, err := time.ParseDuration(task.Timeout); err == nil {
-				taskTimeout = d
-			}
-		}
-
-		// Retry loop: attempt the task up to 1 + MaxRetries times
-		maxAttempts := 1 + task.MaxRetries
-		var results []models.TaskResult
-		var lastErr error
-
-		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			if attempt > 1 {
-				// Exponential backoff: 2^(attempt-2) seconds, capped at 30s
-				backoff := time.Duration(1<<uint(attempt-2)) * time.Second
-				if backoff > 30*time.Second {
-					backoff = 30 * time.Second
-				}
-				log.Info("Retrying task", "job", job.ID, "step", i, "attempt", attempt, "backoff", backoff)
-				select {
-				case <-time.After(backoff):
-				case <-ctx.Done():
-					job.Status = models.JobCancelled
-					s.client.UpdateJob(job)
-					return
-				}
-
-				// Re-dispatch command for retry
-				if err := s.client.PublishCommand(job.ID, i, job.Target, task); err != nil {
-					log.Error("Failed to publish retry command", "job", job.ID, "step", i, "error", err)
-					job.Status = models.JobFailed
-					s.client.UpdateJob(job)
-					return
-				}
-			} else {
-				// First attempt: publish command
-				if err := s.client.PublishCommand(job.ID, i, job.Target, task); err != nil {
-					log.Error("Failed to publish command", "job", job.ID, "step", i, "error", err)
-					job.Status = models.JobFailed
-					s.client.UpdateJob(job)
-					return
-				}
+		for msg := range msgs.Messages() {
+			var result models.TaskResult
+			if err := json.Unmarshal(msg.Data(), &result); err != nil {
+				log.Error("Failed to decode pipeline result", "error", err)
+				msg.Ack()
+				continue
 			}
 
-			// Collect results for this step
-			var err error
-			results, err = s.collectResults(ctx, job.ID, i, activeNodes, taskTimeout)
-			if err != nil {
-				if ctx.Err() != nil {
-					log.Info("Job cancelled during result collection", "job", job.ID, "step", i)
-					job.Status = models.JobCancelled
+			np, ok := progress[result.NodeID]
+			if !ok || np.done {
+				msg.Ack()
+				continue
+			}
+
+			expectedGlobalIndex := startIndex + np.currentStep
+			if result.TaskIndex != expectedGlobalIndex {
+				msg.Ack()
+				continue
+			}
+
+			if result.Status == models.ResultFailed {
+				subPhase := subPhases[np.currentStep]
+				maxRetries := subPhase.MaxRetries
+
+				if np.retries < maxRetries {
+					np.retries++
+					// Exponential backoff
+					backoff := time.Duration(1<<uint(np.retries-1)) * time.Second
+					if backoff > 30*time.Second {
+						backoff = 30 * time.Second
+					}
+					log.Info("Retrying pipeline sub-step", "job", job.ID, "node", result.NodeID, "step", np.currentStep, "retry", np.retries, "backoff", backoff)
+
+					go func(nodeID string, globalIdx int, task models.Task, delay time.Duration) {
+						select {
+						case <-time.After(delay):
+						case <-ctx.Done():
+							return
+						}
+						s.client.PublishCommandToNode(job.ID, globalIdx, nodeID, task)
+					}(result.NodeID, expectedGlobalIndex, subPhase.ToTask(), backoff)
+
+					msg.Ack()
+					continue
+				}
+
+				// Sub-step failed after all retries
+				s.storeSingleResult(job, expectedGlobalIndex, result, np.retries+1)
+				state.stepFailed = true
+
+				if job.Strategy == models.StrategyContinue {
+					log.Info("Pipeline node failed, continuing", "job", job.ID, "node", result.NodeID, "step", np.currentStep)
+					np.done = true
+					np.failed = true
+					// Store skipped results for remaining sub-steps
+					for si := np.currentStep + 1; si < len(subPhases); si++ {
+						globalIdx := startIndex + si
+						s.storeSingleSkipped(job, globalIdx, result.NodeID)
+					}
 				} else {
-					log.Error("Result collection failed", "job", job.ID, "step", i, "error", err)
-					job.Status = models.JobFailed
-				}
-				s.client.UpdateJob(job)
-				return
-			}
-
-			// Check if any nodes failed
-			anyFailed := false
-			for _, r := range results {
-				if r.Status == models.ResultFailed {
-					anyFailed = true
-					break
-				}
-			}
-
-			if !anyFailed {
-				// All succeeded, store and move on
-				s.storeResults(&job, i, results, attempt)
-				lastErr = nil
-				break
-			}
-
-			// There were failures
-			if attempt < maxAttempts {
-				lastErr = fmt.Errorf("failures on attempt %d", attempt)
-				continue // retry
-			}
-
-			// Final attempt with failures — store and apply strategy
-			s.storeResults(&job, i, results, attempt)
-			lastErr = fmt.Errorf("failures after %d attempts", maxAttempts)
-		}
-
-		log.Info("Task step complete", "job", job.ID, "step", i, "results", len(results))
-
-		if lastErr != nil {
-			// Mark that a step has failed (for conditional execution)
-			stepFailed = true
-
-			// Apply failure strategy on final failure
-			for _, r := range results {
-				if r.Status == models.ResultFailed {
-					if job.Strategy == models.StrategyContinue {
-						for j, id := range activeNodes {
-							if id == r.NodeID {
-								activeNodes = append(activeNodes[:j], activeNodes[j+1:]...)
-								break
+					log.Info("Pipeline node failed, fail-fast triggered", "job", job.ID, "node", result.NodeID, "step", np.currentStep)
+					state.failFastTriggered = true
+					np.done = true
+					np.failed = true
+					// Mark all other nodes as done too
+					for nid, other := range progress {
+						if !other.done {
+							other.done = true
+							other.failed = true
+							// Store skipped for their remaining sub-steps
+							for si := other.currentStep; si < len(subPhases); si++ {
+								globalIdx := startIndex + si
+								s.storeSingleSkipped(job, globalIdx, nid)
 							}
 						}
-						log.Info("Node failed, continuing", "job", job.ID, "node", r.NodeID)
-					} else {
-						log.Info("Node failed, fail-fast triggered", "job", job.ID, "node", r.NodeID)
-						failFastTriggered = true
+					}
+				}
+
+				msg.Ack()
+				continue
+			}
+
+			// Success — store result and advance
+			s.storeSingleResult(job, expectedGlobalIndex, result, np.retries+1)
+			np.retries = 0 // reset for next sub-step
+			np.currentStep++
+
+			if np.currentStep >= len(subPhases) {
+				// Node completed all sub-steps
+				np.done = true
+				log.Debug("Pipeline node completed all sub-steps", "job", job.ID, "node", result.NodeID)
+			} else {
+				// Dispatch next sub-step to this node
+				nextTask := subPhases[np.currentStep].ToTask()
+				nextGlobalIdx := startIndex + np.currentStep
+				if err := s.client.PublishCommandToNode(job.ID, nextGlobalIdx, result.NodeID, nextTask); err != nil {
+					log.Error("Failed to dispatch next pipeline step", "job", job.ID, "node", result.NodeID, "error", err)
+					np.done = true
+					np.failed = true
+				}
+			}
+
+			msg.Ack()
+		}
+	}
+
+	// Advance flat index past all sub-steps
+	state.flatIndex += len(subPhases)
+
+	// Remove failed nodes from activeNodes (for continue strategy)
+	if job.Strategy == models.StrategyContinue {
+		for nodeID, np := range progress {
+			if np.failed {
+				for j, id := range state.activeNodes {
+					if id == nodeID {
+						state.activeNodes = append(state.activeNodes[:j], state.activeNodes[j+1:]...)
+						break
 					}
 				}
 			}
-
-			if len(activeNodes) == 0 {
-				job.Status = models.JobFailed
-				s.client.UpdateJob(job)
-				return
-			}
+		}
+		if len(state.activeNodes) == 0 {
+			job.Status = models.JobFailed
+			s.client.UpdateJob(*job)
+			return
 		}
 	}
 
-	if failFastTriggered {
-		job.Status = models.JobFailed
-	} else {
-		job.Status = models.JobCompleted
-	}
-	if err := s.client.UpdateJob(job); err != nil {
-		log.Error("Failed to mark job done", "id", job.ID, "error", err)
-	}
-	log.Info("Job done", "id", job.ID, "status", job.Status)
+	log.Info("Pipeline complete", "job", job.ID, "startIndex", startIndex, "subSteps", len(subPhases))
 }
 
 // collectResults watches the results stream for a specific job+step and waits
@@ -437,8 +731,8 @@ func (s *Scheduler) collectResults(ctx context.Context, jobID string, taskIndex 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Create an ephemeral consumer on the results stream filtered to this job
-	filterSubject := fmt.Sprintf("result.%s.>", jobID)
+	// Create an ephemeral consumer on the results stream filtered to this job+step
+	filterSubject := fmt.Sprintf("result.%s.%d.>", jobID, taskIndex)
 
 	stream, err := s.client.GetStream("results")
 	if err != nil {
@@ -522,6 +816,44 @@ func (s *Scheduler) storeResults(job *models.Job, step int, results []models.Tas
 			nr.Attempts = attempts
 		}
 		job.Results[stepKey][r.NodeID] = nr
+	}
+	s.client.UpdateJob(*job)
+}
+
+// storeSingleResult persists a single node's result for a step.
+func (s *Scheduler) storeSingleResult(job *models.Job, step int, result models.TaskResult, attempts int) {
+	stepKey := strconv.Itoa(step)
+	if job.Results == nil {
+		job.Results = make(models.JobResults)
+	}
+	if job.Results[stepKey] == nil {
+		job.Results[stepKey] = make(map[string]models.NodeResult)
+	}
+	nr := models.NodeResult{
+		Status:   result.Status,
+		Output:   result.Output,
+		Error:    result.Error,
+		Duration: result.Duration.String(),
+	}
+	if attempts > 1 {
+		nr.Attempts = attempts
+	}
+	job.Results[stepKey][result.NodeID] = nr
+	s.client.UpdateJob(*job)
+}
+
+// storeSingleSkipped writes a skipped result for a single node at a step.
+func (s *Scheduler) storeSingleSkipped(job *models.Job, step int, nodeID string) {
+	stepKey := strconv.Itoa(step)
+	if job.Results == nil {
+		job.Results = make(models.JobResults)
+	}
+	if job.Results[stepKey] == nil {
+		job.Results[stepKey] = make(map[string]models.NodeResult)
+	}
+	job.Results[stepKey][nodeID] = models.NodeResult{
+		Status:   models.ResultSkipped,
+		Duration: "0s",
 	}
 	s.client.UpdateJob(*job)
 }

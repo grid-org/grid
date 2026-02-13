@@ -127,7 +127,7 @@ func apiPost(api, path string, payload any) ([]byte, int, error) {
 func (r *RunJobCmd) Run(app *CLI) error {
 	target := parseTarget(r.Target)
 
-	var tasks []models.Task
+	var tasks []models.Phase
 	var strategy models.Strategy
 	var timeout string
 
@@ -153,7 +153,7 @@ func (r *RunJobCmd) Run(app *CLI) error {
 			return fmt.Errorf("provide backend and action, or use -f for a job file")
 		}
 		params := parseParams(r.Params)
-		tasks = []models.Task{{Backend: r.Backend, Action: r.Action, Params: params}}
+		tasks = []models.Phase{{Backend: r.Backend, Action: r.Action, Params: params}}
 	}
 
 	// CLI flags override file values

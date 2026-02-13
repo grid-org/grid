@@ -194,7 +194,7 @@ func TestEnqueue(t *testing.T) {
 	job := models.Job{
 		ID:     "enqueue-1",
 		Target: models.Target{Scope: "all"},
-		Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+		Tasks:  []models.Phase{{Backend: "test", Action: "succeed"}},
 	}
 
 	enqueued, err := sched.Enqueue(job)
@@ -226,7 +226,7 @@ func TestEnqueue_InvalidTarget(t *testing.T) {
 	job := models.Job{
 		ID:     "enqueue-bad",
 		Target: models.Target{Scope: "group", Value: "nonexistent"},
-		Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+		Tasks:  []models.Phase{{Backend: "test", Action: "succeed"}},
 	}
 
 	_, err := sched.Enqueue(job)
@@ -252,7 +252,7 @@ func TestExecute_SingleTask(t *testing.T) {
 	job := models.Job{
 		ID:     "exec-single",
 		Target: models.Target{Scope: "all"},
-		Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+		Tasks:  []models.Phase{{Backend: "test", Action: "succeed"}},
 	}
 
 	_, err := sched.Enqueue(job)
@@ -291,7 +291,7 @@ func TestExecute_MultiStep(t *testing.T) {
 	job := models.Job{
 		ID:     "exec-multi",
 		Target: models.Target{Scope: "all"},
-		Tasks: []models.Task{
+		Tasks: []models.Phase{
 			{Backend: "test", Action: "succeed"},
 			{Backend: "test", Action: "succeed"},
 			{Backend: "test", Action: "succeed"},
@@ -339,7 +339,7 @@ func TestExecute_FailFast(t *testing.T) {
 		ID:       "exec-failfast",
 		Target:   models.Target{Scope: "all"},
 		Strategy: models.StrategyFailFast,
-		Tasks: []models.Task{
+		Tasks: []models.Phase{
 			{Backend: "test", Action: "succeed"},
 			{Backend: "test", Action: "succeed"}, // should not execute
 		},
@@ -389,7 +389,7 @@ func TestExecute_Continue(t *testing.T) {
 		ID:       "exec-continue",
 		Target:   models.Target{Scope: "all"},
 		Strategy: models.StrategyContinue,
-		Tasks: []models.Task{
+		Tasks: []models.Phase{
 			{Backend: "test", Action: "succeed"},
 			{Backend: "test", Action: "succeed"},
 		},
@@ -427,7 +427,7 @@ func TestCancel_Pending(t *testing.T) {
 	job := models.Job{
 		ID:     "cancel-pending",
 		Target: models.Target{Scope: "all"},
-		Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+		Tasks:  []models.Phase{{Backend: "test", Action: "succeed"}},
 	}
 
 	_, err := sched.Enqueue(job)
@@ -467,7 +467,7 @@ func TestCancel_Running(t *testing.T) {
 	job := models.Job{
 		ID:     "cancel-running",
 		Target: models.Target{Scope: "all"},
-		Tasks:  []models.Task{{Backend: "test", Action: "sleep", Params: map[string]string{"duration": "30s"}}},
+		Tasks:  []models.Phase{{Backend: "test", Action: "sleep", Params: map[string]string{"duration": "30s"}}},
 	}
 
 	_, err := sched.Enqueue(job)
@@ -512,7 +512,7 @@ func TestExecute_TaskTimeout(t *testing.T) {
 	job := models.Job{
 		ID:     "exec-timeout",
 		Target: models.Target{Scope: "all"},
-		Tasks: []models.Task{{
+		Tasks: []models.Phase{{
 			Backend: "test",
 			Action:  "succeed",
 			Timeout: "2s", // short timeout
@@ -611,7 +611,7 @@ func TestExecute_Retry(t *testing.T) {
 	job := models.Job{
 		ID:     "exec-retry",
 		Target: models.Target{Scope: "all"},
-		Tasks: []models.Task{{
+		Tasks: []models.Phase{{
 			Backend:    "test",
 			Action:     "succeed",
 			MaxRetries: 3,
@@ -690,7 +690,7 @@ func TestConditionOnSuccess_SkipsOnFailure(t *testing.T) {
 		ID:       "cond-onsuccess-skip",
 		Target:   models.Target{Scope: "all"},
 		Strategy: models.StrategyContinue,
-		Tasks: []models.Task{
+		Tasks: []models.Phase{
 			{Backend: "test", Action: "succeed"},                                      // step 0: n1 ok, n2 fails → n2 excluded
 			{Backend: "test", Action: "succeed", Condition: models.ConditionOnSuccess}, // step 1: should be skipped (stepFailed)
 			{Backend: "test", Action: "succeed", Condition: models.ConditionAlways},    // step 2: should run on n1
@@ -747,7 +747,7 @@ func TestConditionOnFailure_RunsCleanup(t *testing.T) {
 		ID:       "cond-onfailure-runs",
 		Target:   models.Target{Scope: "all"},
 		Strategy: models.StrategyFailFast,
-		Tasks: []models.Task{
+		Tasks: []models.Phase{
 			{Backend: "test", Action: "fail"},                                         // step 0: fails → fail-fast triggered
 			{Backend: "test", Action: "succeed", Condition: models.ConditionOnFailure}, // step 1: should run (on_failure cleanup)
 		},
@@ -793,7 +793,7 @@ func TestConditionOnFailure_SkippedOnSuccess(t *testing.T) {
 	job := models.Job{
 		ID:     "cond-onfailure-skip",
 		Target: models.Target{Scope: "all"},
-		Tasks: []models.Task{
+		Tasks: []models.Phase{
 			{Backend: "test", Action: "succeed"},                                      // step 0: succeeds
 			{Backend: "test", Action: "succeed", Condition: models.ConditionOnFailure}, // step 1: should be skipped
 		},
@@ -845,7 +845,7 @@ func TestFailFast_StillRunsOnFailureTasks(t *testing.T) {
 		ID:       "failfast-onfailure",
 		Target:   models.Target{Scope: "all"},
 		Strategy: models.StrategyFailFast,
-		Tasks: []models.Task{
+		Tasks: []models.Phase{
 			{Backend: "test", Action: "fail"},                                         // step 0: fails → fail-fast triggers
 			{Backend: "test", Action: "succeed"},                                      // step 1: should be skipped (fail-fast, no condition)
 			{Backend: "test", Action: "succeed", Condition: models.ConditionOnFailure}, // step 2: should run (on_failure)
@@ -900,7 +900,7 @@ func TestConditionDefault_IsAlways(t *testing.T) {
 	job := models.Job{
 		ID:     "cond-default",
 		Target: models.Target{Scope: "all"},
-		Tasks: []models.Task{
+		Tasks: []models.Phase{
 			{Backend: "test", Action: "succeed"},
 			{Backend: "test", Action: "succeed"},
 		},
@@ -946,7 +946,7 @@ func TestQueueFull_RejectsWhenPendingExceeded(t *testing.T) {
 		job := models.Job{
 			ID:     fmt.Sprintf("queue-fill-%d", i),
 			Target: models.Target{Scope: "all"},
-			Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+			Tasks:  []models.Phase{{Backend: "test", Action: "succeed"}},
 		}
 		_, err := sched.Enqueue(job)
 		if err != nil {
@@ -958,7 +958,7 @@ func TestQueueFull_RejectsWhenPendingExceeded(t *testing.T) {
 	job := models.Job{
 		ID:     "queue-overflow",
 		Target: models.Target{Scope: "all"},
-		Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+		Tasks:  []models.Phase{{Backend: "test", Action: "succeed"}},
 	}
 	_, err := sched.Enqueue(job)
 	if err != scheduler.ErrQueueFull {
@@ -995,7 +995,7 @@ func TestMaxConcurrent_LimitsParallelJobs(t *testing.T) {
 		job := models.Job{
 			ID:     fmt.Sprintf("concurrent-%d", i),
 			Target: models.Target{Scope: "all"},
-			Tasks:  []models.Task{{Backend: "test", Action: "sleep", Params: map[string]string{"duration": "2s"}}},
+			Tasks:  []models.Phase{{Backend: "test", Action: "sleep", Params: map[string]string{"duration": "2s"}}},
 		}
 		_, err := sched.Enqueue(job)
 		if err != nil {
@@ -1048,7 +1048,7 @@ func TestConcurrentJobs_CompleteIndependently(t *testing.T) {
 		job := models.Job{
 			ID:     fmt.Sprintf("indep-%d", i),
 			Target: models.Target{Scope: "all"},
-			Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+			Tasks:  []models.Phase{{Backend: "test", Action: "succeed"}},
 		}
 		_, err := sched.Enqueue(job)
 		if err != nil {
@@ -1070,6 +1070,604 @@ func TestConcurrentJobs_CompleteIndependently(t *testing.T) {
 		if got.Status != models.JobCompleted {
 			t.Errorf("job indep-%d status = %q, want completed", i, got.Status)
 		}
+	}
+}
+
+// --- Phase Validation Tests ---
+
+func TestPhaseValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		phase   models.Phase
+		wantErr bool
+	}{
+		{
+			"valid leaf",
+			models.Phase{Backend: "test", Action: "succeed"},
+			false,
+		},
+		{
+			"valid branch",
+			models.Phase{Tasks: []models.Phase{
+				{Backend: "test", Action: "succeed"},
+				{Backend: "test", Action: "fail"},
+			}},
+			false,
+		},
+		{
+			"empty phase",
+			models.Phase{},
+			true,
+		},
+		{
+			"leaf and branch",
+			models.Phase{Backend: "test", Action: "succeed", Tasks: []models.Phase{
+				{Backend: "test", Action: "fail"},
+			}},
+			true,
+		},
+		{
+			"leaf missing action",
+			models.Phase{Backend: "test"},
+			true,
+		},
+		{
+			"max depth exceeded",
+			models.Phase{Tasks: []models.Phase{
+				{Tasks: []models.Phase{
+					{Backend: "test", Action: "succeed"},
+				}},
+			}},
+			true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.phase.Validate(0)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLeafCount(t *testing.T) {
+	tests := []struct {
+		name   string
+		phases []models.Phase
+		want   int
+	}{
+		{
+			"flat phases",
+			[]models.Phase{
+				{Backend: "test", Action: "a"},
+				{Backend: "test", Action: "b"},
+				{Backend: "test", Action: "c"},
+			},
+			3,
+		},
+		{
+			"pipeline only",
+			[]models.Phase{
+				{Tasks: []models.Phase{
+					{Backend: "test", Action: "a"},
+					{Backend: "test", Action: "b"},
+				}},
+			},
+			2,
+		},
+		{
+			"mixed barrier and pipeline",
+			[]models.Phase{
+				{Backend: "test", Action: "a"},     // step 0
+				{Tasks: []models.Phase{              // pipeline
+					{Backend: "test", Action: "b"},  // step 1
+					{Backend: "test", Action: "c"},  // step 2
+				}},
+				{Backend: "test", Action: "d"},     // step 3
+			},
+			4,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := models.PhaseLeafCount(tt.phases)
+			if got != tt.want {
+				t.Errorf("PhaseLeafCount() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// --- Pipeline Execution Tests ---
+
+func TestPipeline_SingleNode(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	sched := setupScheduler(t, env, nodes, "web")
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	stopWorkers := startMockWorkers(t, env, nodes, behaviorSucceed)
+	defer stopWorkers()
+
+	job := models.Job{
+		ID:     "pipe-single",
+		Target: models.Target{Scope: "all"},
+		Tasks: []models.Phase{
+			{Tasks: []models.Phase{
+				{Backend: "test", Action: "succeed"},
+				{Backend: "test", Action: "succeed"},
+				{Backend: "test", Action: "succeed"},
+			}},
+		},
+	}
+
+	_, err := sched.Enqueue(job)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	testutil.WaitFor(t, 15*time.Second, func() bool {
+		j, _ := env.Client.GetJob("pipe-single")
+		return j.Status == models.JobCompleted
+	}, "pipeline job should complete")
+
+	got, _ := env.Client.GetJob("pipe-single")
+	if got.Status != models.JobCompleted {
+		t.Fatalf("Status = %q, want completed", got.Status)
+	}
+	// 3 leaf steps → results for steps 0, 1, 2
+	if len(got.Results) != 3 {
+		t.Errorf("Results has %d steps, want 3", len(got.Results))
+	}
+	for step := 0; step < 3; step++ {
+		key := strconv.Itoa(step)
+		if len(got.Results[key]) != 1 {
+			t.Errorf("step %d has %d nodes, want 1", step, len(got.Results[key]))
+		}
+	}
+}
+
+func TestPipeline_MultiNode(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1", "n2", "n3"}
+	sched := setupScheduler(t, env, nodes, "web")
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	stopWorkers := startMockWorkers(t, env, nodes, behaviorSucceed)
+	defer stopWorkers()
+
+	job := models.Job{
+		ID:     "pipe-multi",
+		Target: models.Target{Scope: "all"},
+		Tasks: []models.Phase{
+			{Tasks: []models.Phase{
+				{Backend: "test", Action: "succeed"},
+				{Backend: "test", Action: "succeed"},
+			}},
+		},
+	}
+
+	_, err := sched.Enqueue(job)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	testutil.WaitFor(t, 15*time.Second, func() bool {
+		j, _ := env.Client.GetJob("pipe-multi")
+		return j.Status == models.JobCompleted
+	}, "multi-node pipeline should complete")
+
+	got, _ := env.Client.GetJob("pipe-multi")
+	if got.Status != models.JobCompleted {
+		t.Fatalf("Status = %q, want completed", got.Status)
+	}
+	// 2 sub-steps, 3 nodes each
+	for step := 0; step < 2; step++ {
+		key := strconv.Itoa(step)
+		if len(got.Results[key]) != 3 {
+			t.Errorf("step %d has %d nodes, want 3", step, len(got.Results[key]))
+		}
+	}
+}
+
+func TestPipeline_NodeFailure_Continue(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1", "n2"}
+	sched := setupScheduler(t, env, nodes, "web")
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// n1 succeeds, n2 fails on every command
+	stopWorkers := startMixedMockWorkers(t, env, []string{"n1"}, []string{"n2"})
+	defer stopWorkers()
+
+	job := models.Job{
+		ID:       "pipe-continue",
+		Target:   models.Target{Scope: "all"},
+		Strategy: models.StrategyContinue,
+		Tasks: []models.Phase{
+			{Tasks: []models.Phase{
+				{Backend: "test", Action: "succeed"},
+				{Backend: "test", Action: "succeed"},
+			}},
+		},
+	}
+
+	_, err := sched.Enqueue(job)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	testutil.WaitFor(t, 15*time.Second, func() bool {
+		j, _ := env.Client.GetJob("pipe-continue")
+		return j.Status == models.JobCompleted || j.Status == models.JobFailed
+	}, "pipeline with continue should finish")
+
+	got, _ := env.Client.GetJob("pipe-continue")
+	if got.Status != models.JobCompleted {
+		t.Errorf("Status = %q, want completed", got.Status)
+	}
+
+	// Step 0: n1 success, n2 failed
+	if got.Results["0"]["n1"].Status != models.ResultSuccess {
+		t.Errorf("step 0 n1 = %q, want success", got.Results["0"]["n1"].Status)
+	}
+	if got.Results["0"]["n2"].Status != models.ResultFailed {
+		t.Errorf("step 0 n2 = %q, want failed", got.Results["0"]["n2"].Status)
+	}
+
+	// Step 1: n1 success, n2 skipped (excluded after failure)
+	if got.Results["1"]["n1"].Status != models.ResultSuccess {
+		t.Errorf("step 1 n1 = %q, want success", got.Results["1"]["n1"].Status)
+	}
+	if got.Results["1"]["n2"].Status != models.ResultSkipped {
+		t.Errorf("step 1 n2 = %q, want skipped", got.Results["1"]["n2"].Status)
+	}
+}
+
+func TestPipeline_NodeFailure_FailFast(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1", "n2"}
+	sched := setupScheduler(t, env, nodes, "web")
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// n1 succeeds, n2 fails
+	stopWorkers := startMixedMockWorkers(t, env, []string{"n1"}, []string{"n2"})
+	defer stopWorkers()
+
+	job := models.Job{
+		ID:       "pipe-failfast",
+		Target:   models.Target{Scope: "all"},
+		Strategy: models.StrategyFailFast,
+		Tasks: []models.Phase{
+			{Tasks: []models.Phase{
+				{Backend: "test", Action: "succeed"},
+				{Backend: "test", Action: "succeed"},
+			}},
+		},
+	}
+
+	_, err := sched.Enqueue(job)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	testutil.WaitFor(t, 15*time.Second, func() bool {
+		j, _ := env.Client.GetJob("pipe-failfast")
+		return j.Status == models.JobFailed
+	}, "pipeline with fail-fast should fail")
+
+	got, _ := env.Client.GetJob("pipe-failfast")
+	if got.Status != models.JobFailed {
+		t.Errorf("Status = %q, want failed", got.Status)
+	}
+}
+
+func TestMixed_BarrierAndPipeline(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1", "n2"}
+	sched := setupScheduler(t, env, nodes, "web")
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	stopWorkers := startMockWorkers(t, env, nodes, behaviorSucceed)
+	defer stopWorkers()
+
+	job := models.Job{
+		ID:     "mixed-barrier-pipe",
+		Target: models.Target{Scope: "all"},
+		Tasks: []models.Phase{
+			{Backend: "test", Action: "succeed"}, // step 0: barrier
+			{Tasks: []models.Phase{                // pipeline
+				{Backend: "test", Action: "succeed"}, // step 1
+				{Backend: "test", Action: "succeed"}, // step 2
+			}},
+			{Backend: "test", Action: "succeed"}, // step 3: barrier
+		},
+	}
+
+	_, err := sched.Enqueue(job)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	testutil.WaitFor(t, 15*time.Second, func() bool {
+		j, _ := env.Client.GetJob("mixed-barrier-pipe")
+		return j.Status == models.JobCompleted
+	}, "mixed job should complete")
+
+	got, _ := env.Client.GetJob("mixed-barrier-pipe")
+	if got.Status != models.JobCompleted {
+		t.Fatalf("Status = %q, want completed", got.Status)
+	}
+
+	// 4 leaf steps total
+	if len(got.Results) != 4 {
+		t.Errorf("Results has %d steps, want 4", len(got.Results))
+	}
+
+	// Step 0 (barrier): both nodes
+	if len(got.Results["0"]) != 2 {
+		t.Errorf("step 0 has %d nodes, want 2", len(got.Results["0"]))
+	}
+	// Steps 1-2 (pipeline): both nodes
+	for step := 1; step <= 2; step++ {
+		key := strconv.Itoa(step)
+		if len(got.Results[key]) != 2 {
+			t.Errorf("step %d has %d nodes, want 2", step, len(got.Results[key]))
+		}
+	}
+	// Step 3 (barrier): both nodes
+	if len(got.Results["3"]) != 2 {
+		t.Errorf("step 3 has %d nodes, want 2", len(got.Results["3"]))
+	}
+}
+
+func TestPipeline_Condition_Skipped(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	sched := setupScheduler(t, env, nodes, "web")
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	stopWorkers := startMockWorkers(t, env, nodes, behaviorSucceed)
+	defer stopWorkers()
+
+	// All tasks succeed, so on_success pipeline should be skipped (no failure)
+	// Wait, on_success should run when no failure. Let me test on_failure skip instead:
+	// Step 0: succeeds. Pipeline with on_failure: should be skipped.
+	job := models.Job{
+		ID:     "pipe-cond-skip",
+		Target: models.Target{Scope: "all"},
+		Tasks: []models.Phase{
+			{Backend: "test", Action: "succeed"}, // step 0: succeeds
+			{Condition: models.ConditionOnFailure, Tasks: []models.Phase{ // pipeline skipped (no failure)
+				{Backend: "test", Action: "succeed"}, // step 1
+				{Backend: "test", Action: "succeed"}, // step 2
+			}},
+			{Backend: "test", Action: "succeed"}, // step 3: runs
+		},
+	}
+
+	_, err := sched.Enqueue(job)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		j, _ := env.Client.GetJob("pipe-cond-skip")
+		return j.Status == models.JobCompleted
+	}, "job should complete")
+
+	got, _ := env.Client.GetJob("pipe-cond-skip")
+	if got.Status != models.JobCompleted {
+		t.Fatalf("Status = %q, want completed", got.Status)
+	}
+
+	// Steps 1 and 2 should be skipped
+	if got.Results["1"]["n1"].Status != models.ResultSkipped {
+		t.Errorf("step 1 n1 = %q, want skipped", got.Results["1"]["n1"].Status)
+	}
+	if got.Results["2"]["n1"].Status != models.ResultSkipped {
+		t.Errorf("step 2 n1 = %q, want skipped", got.Results["2"]["n1"].Status)
+	}
+
+	// Steps 0 and 3 should have run
+	if got.Results["0"]["n1"].Status != models.ResultSuccess {
+		t.Errorf("step 0 n1 = %q, want success", got.Results["0"]["n1"].Status)
+	}
+	if got.Results["3"]["n1"].Status != models.ResultSuccess {
+		t.Errorf("step 3 n1 = %q, want success", got.Results["3"]["n1"].Status)
+	}
+}
+
+func TestPipeline_Condition_OnFailure(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	sched := setupScheduler(t, env, nodes, "web")
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Step 0: fails. Pipeline with on_failure: should run.
+	stopWorkers := startStepAwareMockWorkers(t, env, nodes, map[int]mockWorkerBehavior{
+		0: behaviorFail,
+		1: behaviorSucceed,
+		2: behaviorSucceed,
+	})
+	defer stopWorkers()
+
+	job := models.Job{
+		ID:       "pipe-cond-onfail",
+		Target:   models.Target{Scope: "all"},
+		Strategy: models.StrategyFailFast,
+		Tasks: []models.Phase{
+			{Backend: "test", Action: "fail"}, // step 0: fails → fail-fast
+			{Condition: models.ConditionOnFailure, Tasks: []models.Phase{ // pipeline runs (on_failure)
+				{Backend: "test", Action: "succeed"}, // step 1
+				{Backend: "test", Action: "succeed"}, // step 2
+			}},
+		},
+	}
+
+	_, err := sched.Enqueue(job)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		j, _ := env.Client.GetJob("pipe-cond-onfail")
+		return j.Status == models.JobFailed
+	}, "job should fail")
+
+	got, _ := env.Client.GetJob("pipe-cond-onfail")
+	if got.Status != models.JobFailed {
+		t.Fatalf("Status = %q, want failed", got.Status)
+	}
+
+	// Steps 1 and 2 (on_failure pipeline) should have run
+	if got.Results["1"]["n1"].Status != models.ResultSuccess {
+		t.Errorf("step 1 n1 = %q, want success", got.Results["1"]["n1"].Status)
+	}
+	if got.Results["2"]["n1"].Status != models.ResultSuccess {
+		t.Errorf("step 2 n1 = %q, want success", got.Results["2"]["n1"].Status)
+	}
+}
+
+func TestPipeline_WithRetry(t *testing.T) {
+	env := testutil.NewTestEnv(t)
+	nodes := []string{"n1"}
+	sched := setupScheduler(t, env, nodes, "web")
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Worker that fails first 2 attempts and succeeds on 3rd
+	stream, err := env.Client.GetStream("commands")
+	if err != nil {
+		t.Fatalf("getting commands stream: %v", err)
+	}
+
+	var mu sync.Mutex
+	attemptCount := 0
+
+	consumer, err := env.Client.EnsureConsumer(stream, jetstream.ConsumerConfig{
+		Durable:        "mock-retry-pipe-n1",
+		FilterSubjects: []string{"cmd.>"},
+		DeliverPolicy:  jetstream.DeliverNewPolicy,
+		AckPolicy:      jetstream.AckExplicitPolicy,
+	})
+	if err != nil {
+		t.Fatalf("creating retry consumer: %v", err)
+	}
+
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+
+	go func() {
+		for {
+			select {
+			case <-workerCtx.Done():
+				return
+			default:
+			}
+
+			msgs, err := consumer.Fetch(1, jetstream.FetchMaxWait(500*time.Millisecond))
+			if err != nil {
+				continue
+			}
+
+			for msg := range msgs.Messages() {
+				jobID := msg.Headers().Get("job-id")
+				taskIndex, _ := strconv.Atoi(msg.Headers().Get("task-index"))
+
+				mu.Lock()
+				attemptCount++
+				attempt := attemptCount
+				mu.Unlock()
+
+				status := models.ResultFailed
+				errMsg := "not yet"
+				if attempt >= 3 {
+					status = models.ResultSuccess
+					errMsg = ""
+				}
+
+				result := models.TaskResult{
+					JobID:     jobID,
+					TaskIndex: taskIndex,
+					NodeID:    "n1",
+					Status:    status,
+					Output:    fmt.Sprintf("attempt %d", attempt),
+					Error:     errMsg,
+					Duration:  50 * time.Millisecond,
+					Timestamp: time.Now(),
+				}
+				env.Client.PublishResult(result)
+				msg.Ack()
+			}
+		}
+	}()
+
+	job := models.Job{
+		ID:     "pipe-retry",
+		Target: models.Target{Scope: "all"},
+		Tasks: []models.Phase{
+			{Tasks: []models.Phase{
+				{Backend: "test", Action: "succeed", MaxRetries: 3, Timeout: "30s"},
+			}},
+		},
+	}
+
+	_, err = sched.Enqueue(job)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		j, _ := env.Client.GetJob("pipe-retry")
+		return j.Status == models.JobCompleted || j.Status == models.JobFailed
+	}, "pipeline retry job should finish")
+
+	got, _ := env.Client.GetJob("pipe-retry")
+	if got.Status != models.JobCompleted {
+		t.Errorf("Status = %q, want completed", got.Status)
 	}
 }
 

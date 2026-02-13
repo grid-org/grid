@@ -57,7 +57,7 @@ func TestCreateJob(t *testing.T) {
 	job := models.Job{
 		ID:     "test-create-1",
 		Target: models.Target{Scope: "all"},
-		Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+		Tasks:  []models.Phase{{Backend: "test", Action: "succeed"}},
 		Status: models.JobPending,
 	}
 
@@ -83,7 +83,7 @@ func TestGetJob(t *testing.T) {
 	job := models.Job{
 		ID:       "test-get-1",
 		Target:   models.Target{Scope: "group", Value: "web"},
-		Tasks:    []models.Task{{Backend: "apt", Action: "install", Params: map[string]string{"package": "curl"}}},
+		Tasks:    []models.Phase{{Backend: "apt", Action: "install", Params: map[string]string{"package": "curl"}}},
 		Status:   models.JobPending,
 		Expected: []string{"web-01"},
 	}
@@ -124,7 +124,7 @@ func TestUpdateJob(t *testing.T) {
 	job := models.Job{
 		ID:     "test-update-1",
 		Target: models.Target{Scope: "all"},
-		Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+		Tasks:  []models.Phase{{Backend: "test", Action: "succeed"}},
 		Status: models.JobPending,
 	}
 
@@ -162,7 +162,7 @@ func TestListJobs(t *testing.T) {
 		job := models.Job{
 			ID:     id,
 			Target: models.Target{Scope: "all"},
-			Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+			Tasks:  []models.Phase{{Backend: "test", Action: "succeed"}},
 		}
 		if _, err := env.Client.CreateJob(job); err != nil {
 			t.Fatalf("CreateJob(%s): %v", id, err)

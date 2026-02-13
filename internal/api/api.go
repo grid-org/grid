@@ -31,7 +31,7 @@ type API struct {
 // JobRequest is the HTTP request body for creating a job.
 type JobRequest struct {
 	Target   models.Target   `json:"target"`
-	Tasks    []models.Task   `json:"tasks"`
+	Tasks    []models.Phase  `json:"tasks"`
 	Strategy models.Strategy `json:"strategy,omitempty"`
 	Timeout  string          `json:"timeout,omitempty"` // overall job timeout (e.g. "30m")
 }
@@ -101,6 +101,10 @@ func (a *API) postJob(ctx echo.Context) error {
 
 	if len(req.Tasks) == 0 {
 		return ctx.JSON(http.StatusBadRequest, J{"error": "at least one task is required"})
+	}
+
+	if err := models.ValidatePhases(req.Tasks); err != nil {
+		return ctx.JSON(http.StatusBadRequest, J{"error": err.Error()})
 	}
 
 	if req.Target.Scope == "" {

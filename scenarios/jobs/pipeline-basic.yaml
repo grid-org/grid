@@ -1,0 +1,22 @@
+target:
+  scope: group
+  value: prod
+tasks:
+  - tasks:
+      - backend: ping
+        action: echo
+        params:
+          message: "pipeline step 1: starting"
+      - backend: ping
+        action: sleep
+        params:
+          duration: "500ms"
+      - backend: ping
+        action: echo
+        params:
+          message: "pipeline step 3: done"
+  - backend: test
+    action: succeed
+    params:
+      message: "barrier: all nodes synced"
+timeout: "30s"

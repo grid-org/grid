@@ -1,0 +1,21 @@
+target:
+  scope: group
+  value: prod
+strategy: fail-fast
+tasks:
+  - tasks:
+      - backend: test
+        action: fail
+        params:
+          message: "intentional failure in pipeline"
+  - condition: on_failure
+    tasks:
+      - backend: ping
+        action: echo
+        params:
+          message: "cleanup: rolling back changes"
+      - backend: test
+        action: succeed
+        params:
+          message: "cleanup: complete"
+timeout: "30s"

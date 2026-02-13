@@ -12,7 +12,7 @@ func TestJob_JSONRoundtrip(t *testing.T) {
 	original := Job{
 		ID:       "job-1",
 		Target:   Target{Scope: "group", Value: "web"},
-		Tasks:    []Task{{Backend: "apt", Action: "install", Params: map[string]string{"package": "curl"}}},
+		Tasks:    []Phase{{Backend: "apt", Action: "install", Params: map[string]string{"package": "curl"}}},
 		Strategy: StrategyFailFast,
 		Timeout:  "30m",
 		Status:   JobRunning,
@@ -72,7 +72,7 @@ func TestJob_OmitEmpty(t *testing.T) {
 	job := Job{
 		ID:     "job-2",
 		Target: Target{Scope: "all"},
-		Tasks:  []Task{{Backend: "ping", Action: "echo"}},
+		Tasks:  []Phase{{Backend: "ping", Action: "echo"}},
 		Status: JobPending,
 	}
 
@@ -158,7 +158,7 @@ func TestNodeInfo_JSONRoundtrip(t *testing.T) {
 func TestJobFile_YAMLRoundtrip(t *testing.T) {
 	original := JobFile{
 		Target:   Target{Scope: "group", Value: "web"},
-		Tasks:    []Task{{Backend: "apt", Action: "update"}, {Backend: "apt", Action: "install", Params: map[string]string{"package": "nginx"}}},
+		Tasks:    []Phase{{Backend: "apt", Action: "update"}, {Backend: "apt", Action: "install", Params: map[string]string{"package": "nginx"}}},
 		Strategy: StrategyContinue,
 		Timeout:  "1h",
 	}
