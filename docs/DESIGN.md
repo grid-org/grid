@@ -25,52 +25,48 @@ are defined, routed to workers, executed across multiple nodes, and reported on.
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    Client["Client\n(CLI / HTTP)"]
+
+    subgraph Controller
+        API["API Server"]
+        Sched["Scheduler"]
+        NATS["Embedded NATS + JetStream"]
+
+        subgraph Streams
+            requests["requests\n(WorkQueue)"]
+            commands["commands\n(Limits)"]
+            results["results\n(Limits)"]
+        end
+
+        subgraph KV["KV Buckets"]
+            jobs[("jobs")]
+            nodes[("nodes")]
+        end
+    end
+
+    subgraph Workers
+        A["Worker A\ngroups: web, prod"]
+        B["Worker B\ngroups: web, prod"]
+        C["Worker C\ngroups: db, prod"]
+    end
+
+    Client -- "POST /job" --> API
+    API -- "publish" --> requests
+    requests -- "pull" --> Sched
+    Sched -- "publish" --> commands
+    Sched <-- "read/write" --> jobs
+    commands -- "consume" --> A & B & C
+    A & B & C -- "publish" --> results
+    results -- "consume" --> Sched
+    A & B & C <-- "heartbeat" --> nodes
 ```
-                          ┌──────────────────────┐
-                          │       Client         │
-                          │  (CLI / HTTP / SDK)  │
-                          └──────────┬───────────┘
-                                     │
-                              POST /job
-                              GET /job/:id
-                              GET /nodes
-                                     │
-                          ┌──────────▼───────────┐
-                          │     Controller       │
-                          │                      │
-                          │  ┌────────────────┐  │
-                          │  │ Embedded NATS  │  │
-                          │  │ + JetStream    │  │
-                          │  └────────────────┘  │
-                          │                      │
-                          │  ┌────────────────┐  │
-                          │  │ Scheduler      │  │
-                          │  │ - validates    │  │
-                          │  │ - resolves     │  │
-                          │  │   targets      │  │
-                          │  │ - dispatches   │  │
-                          │  │ - tracks       │  │
-                          │  │   results      │  │
-                          │  └────────────────┘  │
-                          │                      │
-                          │  ┌────────────────┐  │
-                          │  │ API Server     │  │
-                          │  └────────────────┘  │
-                          └──────────┬───────────┘
-                                     │
-                    ┌────────────────┼────────────────┐
-                    │                │                │
-             ┌──────▼──────┐  ┌─────▼───────┐  ┌────▼────────┐
-             │  Worker A   │  │  Worker B   │  │  Worker C   │
-             │             │  │             │  │             │
-             │ groups:     │  │ groups:     │  │ groups:     │
-             │  [web,prod] │  │  [web,prod] │  │  [db,prod]  │
-             │             │  │             │  │             │
-             │ backends:   │  │ backends:   │  │ backends:   │
-             │  [apt,      │  │  [apt,      │  │  [apt,      │
-             │   systemd]  │  │   systemd]  │  │   systemd]  │
-             └─────────────┘  └─────────────┘  └─────────────┘
-```
+
+The three JetStream streams form the data backbone: `requests` (WorkQueue) for job submission,
+`commands` (Limits) for controller-to-worker dispatch, and `results` (Limits) for worker-to-controller
+reporting. Two KV buckets store durable state: `jobs` for job definitions/status and `nodes` for
+worker registration/health.
 
 ## Data Model
 
@@ -313,6 +309,21 @@ API calls) don't need this.
 The scheduler is the new core of the controller. It replaces the current
 "create streams and wait" logic with an active orchestration loop.
 
+### Job State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending : API submits job
+    pending --> running : Scheduler picks up
+    pending --> cancelled : Cancel before execution
+    running --> completed : All phases succeed
+    running --> failed : Fail-fast or timeout
+    running --> cancelled : API cancel request
+    completed --> [*]
+    failed --> [*]
+    cancelled --> [*]
+```
+
 ### Job Lifecycle
 
 ```
@@ -363,9 +374,33 @@ The main `execute()` method:
 3. Calls `executePhases(ctx, job, job.Tasks, state)` — the recursive walker
 4. Applies terminal status based on `failFastTriggered` flag
 
+```mermaid
+flowchart TD
+    Start["executePhases(phases)"] --> Loop["For each phase"]
+    Loop --> CtxCheck{"Context\ncancelled?"}
+    CtxCheck -- Yes --> Return["Return"]
+    CtxCheck -- No --> NodeCheck{"Active nodes\n> 0?"}
+    NodeCheck -- No --> Return
+    NodeCheck -- Yes --> FFCheck{"failFastTriggered\n&& not on_failure?"}
+    FFCheck -- Yes --> Skip["Skip phase"]
+    Skip --> Loop
+    FFCheck -- No --> CondEval{"Evaluate\ncondition"}
+    CondEval -- "on_success\n&& stepFailed" --> Skip
+    CondEval -- "on_failure\n&& !stepFailed" --> Skip
+    CondEval -- "Condition met" --> TypeCheck{"Phase type?"}
+
+    TypeCheck -- "Leaf" --> Barrier["executeBarrierStep\n→ broadcast, collect,\napply strategy"]
+    TypeCheck -- "Branch" --> Pipeline["executePipeline\n→ per-node dispatch,\nindependent advance"]
+
+    Barrier --> UpdateState["Update stepFailed,\nflatIndex, activeNodes"]
+    Pipeline --> UpdateState
+    UpdateState --> Loop
+```
+
 The recursive walker (`executePhases`) iterates over a slice of phases and
 for each one:
 - Checks context cancellation and active node count
+- If fail-fast was triggered, only `on_failure` phases continue to execute
 - Evaluates conditions (`always`, `on_success`, `on_failure`) against `stepFailed`
 - Delegates to `executeBarrierStep()` for leaf phases or `executePipeline()` for branches
 
@@ -590,65 +625,92 @@ GET  /status                 Get cluster status
 
 **Scenario**: Install curl on all web servers, then restart nginx.
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Ctrl as Controller/Scheduler
+    participant W1 as web-01
+    participant W2 as web-02
+    participant W3 as web-03
+
+    Client->>Ctrl: POST /job {apt/install, systemd/restart}
+    Note over Ctrl: Resolve target → web-01, web-02, web-03<br/>Store job: status=running, step=0
+
+    Ctrl->>W1: cmd.group.web.apt.install (task-index=0)
+    Ctrl->>W2: cmd.group.web.apt.install (task-index=0)
+    Ctrl->>W3: cmd.group.web.apt.install (task-index=0)
+    W1-->>Ctrl: result.j1.0.web-01 ✓
+    W2-->>Ctrl: result.j1.0.web-02 ✓
+    W3-->>Ctrl: result.j1.0.web-03 ✓
+    Note over Ctrl: 3/3 results — advance to step 1
+
+    Ctrl->>W1: cmd.group.web.systemd.restart (task-index=1)
+    Ctrl->>W2: cmd.group.web.systemd.restart (task-index=1)
+    Ctrl->>W3: cmd.group.web.systemd.restart (task-index=1)
+    W1-->>Ctrl: result.j1.1.web-01 ✓
+    W2-->>Ctrl: result.j1.1.web-02 ✓
+    W3-->>Ctrl: result.j1.1.web-03 ✓
+    Note over Ctrl: Job completed
+
+    Client->>Ctrl: GET /job/j1
+    Ctrl-->>Client: Full results per node per step
 ```
-1. Client: POST /job
-   {target: {scope: "group", value: "web"}, tasks: [apt/install, systemd/restart]}
 
-2. Controller/Scheduler:
-   - Looks up nodes KV → web-01, web-02, web-03 are in group "web"
-   - Stores job in KV: {id: "j1", status: "running", step: 0, expected: [...]}
-   - Publishes to commands stream:
-     Subject: cmd.group.web.apt.install
-     Headers: {job-id: "j1", task-index: "0"}
-     Data: {"package": "curl"}
-
-3. Workers (web-01, web-02, web-03):
-   - Each has consumer with filter "cmd.group.web.>"
-   - Each receives the message independently
-   - Each executes: apt-get install -y curl
-   - Each publishes to results stream:
-     Subject: result.j1.0.web-01  (result.<jobID>.<taskIndex>.<nodeID>)
-
-4. Controller/Scheduler:
-   - Watches result.j1.0.> (filtered to task index 0)
-   - Receives 3 results, all success
-   - Updates job: step=1
-   - Publishes next command:
-     Subject: cmd.group.web.systemd.restart
-     Headers: {job-id: "j1", task-index: "1"}
-
-5. Workers execute systemd restart, publish results to result.j1.1.<nodeID>.
-
-6. Controller: all results in, updates job status to "completed".
-
-7. Client: GET /job/j1 → sees full results per node per step.
-```
+Key details:
+- Commands are broadcast via `cmd.<scope>.<value>.<backend>.<action>`. Each worker's durable consumer has a filter subject matching its groups, so all web workers receive `cmd.group.web.>` independently.
+- Results use the subject pattern `result.<jobID>.<taskIndex>.<nodeID>` — one unique subject per (job, step, node) triple.
+- The scheduler creates an ephemeral consumer filtered to `result.<jobID>.<taskIndex>.>` to collect results for the current step, then advances only after all expected nodes have reported.
 
 ### Pipeline Execution (Hierarchical Job)
 
 **Scenario**: Each web server independently installs and enables nginx, then all
 start the service together.
 
+Job phases: `[pipeline[apt/update, apt/install, systemd/enable], barrier[systemd/start]]`
+Flat step indices: 0, 1, 2 (pipeline sub-steps), 3 (barrier).
+
+```mermaid
+sequenceDiagram
+    participant Ctrl as Controller
+    participant W1 as web-01
+    participant W2 as web-02
+
+    Note over Ctrl: Pipeline phase — per-node dispatch
+
+    Ctrl->>W1: cmd.node.web-01.apt.update (task-index=0)
+    Ctrl->>W2: cmd.node.web-02.apt.update (task-index=0)
+
+    W1-->>Ctrl: result.j2.0.web-01 ✓
+    Note over Ctrl,W1: web-01 done — advance immediately
+    Ctrl->>W1: cmd.node.web-01.apt.install (task-index=1)
+
+    W1-->>Ctrl: result.j2.1.web-01 ✓
+    Ctrl->>W1: cmd.node.web-01.systemd.enable (task-index=2)
+
+    W2-->>Ctrl: result.j2.0.web-02 ✓
+    Ctrl->>W2: cmd.node.web-02.apt.install (task-index=1)
+
+    W1-->>Ctrl: result.j2.2.web-01 ✓
+    Note over W1: web-01 pipeline complete
+
+    W2-->>Ctrl: result.j2.1.web-02 ✓
+    Ctrl->>W2: cmd.node.web-02.systemd.enable (task-index=2)
+    W2-->>Ctrl: result.j2.2.web-02 ✓
+    Note over Ctrl: All nodes finished pipeline
+
+    Note over Ctrl: Barrier phase — broadcast
+    Ctrl->>W1: cmd.group.web.systemd.start (task-index=3)
+    Ctrl->>W2: cmd.group.web.systemd.start (task-index=3)
+    W1-->>Ctrl: result.j2.3.web-01 ✓
+    W2-->>Ctrl: result.j2.3.web-02 ✓
+    Note over Ctrl: Job completed
 ```
-Job phases: [pipeline[apt/update, apt/install, systemd/enable], barrier[systemd/start]]
-Flat step indices: 0, 1, 2 (pipeline), 3 (barrier)
 
-1. Controller dispatches pipeline phase to each node individually:
-   - cmd.node.web-01.apt.update  (headers: job-id=j2, task-index=0)
-   - cmd.node.web-02.apt.update  (headers: job-id=j2, task-index=0)
-   - cmd.node.web-03.apt.update  (headers: job-id=j2, task-index=0)
-
-2. web-01 completes apt/update → publishes result.j2.0.web-01
-   Controller immediately dispatches: cmd.node.web-01.apt.install (task-index=1)
-   (web-02 and web-03 are still running apt/update — no waiting)
-
-3. Each node advances independently through sub-steps 0→1→2.
-
-4. All nodes complete the pipeline. Controller advances to barrier phase.
-   Broadcasts: cmd.group.web.systemd.start (task-index=3)
-
-5. All nodes execute, publish results. Job completed.
-```
+Key details:
+- Pipeline dispatch uses per-node subjects: `cmd.node.<nodeID>.<backend>.<action>`. This ensures each node receives only its own commands.
+- The scheduler creates a single ephemeral consumer on `result.<jobID>.>` for the entire pipeline, processing results as they arrive and dispatching the next sub-step to whichever node just finished.
+- Per-sub-step retries are supported within the pipeline. `DeliverLastPerSubjectPolicy` on the results stream naturally deduplicates retry attempts since each (job, step, node) triple has a unique subject.
+- The pipeline advances `flatIndex` by the total number of sub-steps when complete, then the next top-level barrier phase broadcasts normally.
 
 ## Implementation Status
 

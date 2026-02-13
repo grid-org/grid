@@ -19,36 +19,84 @@
 
 ## Architecture
 
-```
-                      ┌──────────────────────┐
-                      │       Client         │
-                      │    (gridc CLI)       │
-                      └──────────┬───────────┘
-                                 │ HTTP
-                      ┌──────────▼───────────┐
-                      │     Controller       │
-                      │  ┌────────────────┐  │
-                      │  │ Embedded NATS  │  │
-                      │  │ + JetStream    │  │
-                      │  ├────────────────┤  │
-                      │  │   Scheduler    │  │
-                      │  ├────────────────┤  │
-                      │  │  API Server    │  │
-                      │  └────────────────┘  │
-                      └──────────┬───────────┘
-                                 │ NATS
-                ┌────────────────┼────────────────┐
-         ┌──────▼──────┐  ┌─────▼───────┐  ┌────▼────────┐
-         │  Worker A   │  │  Worker B   │  │  Worker C   │
-         │ groups:     │  │ groups:     │  │ groups:     │
-         │  [web,prod] │  │  [web,prod] │  │  [db,prod]  │
-         │ backends:   │  │ backends:   │  │ backends:   │
-         │  [apt,      │  │  [apt,      │  │  [apt,      │
-         │   systemd]  │  │   systemd]  │  │   systemd]  │
-         └─────────────┘  └─────────────┘  └─────────────┘
+```mermaid
+flowchart TB
+    Client["Client\n(gridc CLI)"]
+
+    subgraph Controller
+        API["API Server"]
+        Scheduler
+        NATS["Embedded NATS\n+ JetStream"]
+    end
+
+    subgraph Workers
+        A["Worker A\ngroups: web, prod\nbackends: apt, systemd"]
+        B["Worker B\ngroups: web, prod\nbackends: apt, systemd"]
+        C["Worker C\ngroups: db, prod\nbackends: apt, systemd"]
+    end
+
+    Client -- "HTTP" --> API
+    NATS -- "NATS" --> A
+    NATS -- "NATS" --> B
+    NATS -- "NATS" --> C
 ```
 
 The CLI client (`gridc`) is HTTP-only — it talks to the controller's REST API. Workers connect to the controller's embedded NATS server.
+
+## Execution Models
+
+YAML structure defines the execution mode. **Barrier** (flat list) synchronizes all nodes between steps. **Pipeline** (nested `tasks` block) lets each node advance independently.
+
+#### Barrier (default)
+
+All nodes must complete each step before the next one begins:
+
+```mermaid
+sequenceDiagram
+    participant C as Controller
+    participant W1 as web-01
+    participant W2 as web-02
+
+    C->>W1: Step 1: apt install
+    C->>W2: Step 1: apt install
+    W1-->>C: success
+    W2-->>C: success
+    Note over C: All nodes done — advance
+
+    C->>W1: Step 2: systemd start
+    C->>W2: Step 2: systemd start
+    W1-->>C: success
+    W2-->>C: success
+    Note over C: Job completed
+```
+
+#### Pipeline
+
+Each node advances through sub-steps on its own — no cross-node waiting:
+
+```mermaid
+sequenceDiagram
+    participant C as Controller
+    participant W1 as web-01
+    participant W2 as web-02
+
+    C->>W1: Sub-step 1: apt update
+    C->>W2: Sub-step 1: apt update
+    W1-->>C: success
+    Note over C,W1: web-01 ready — advance immediately
+    C->>W1: Sub-step 2: apt install
+    W2-->>C: success
+    C->>W2: Sub-step 2: apt install
+    W1-->>C: success
+    C->>W1: Sub-step 3: systemd enable
+    W1-->>C: success
+    W2-->>C: success
+    C->>W2: Sub-step 3: systemd enable
+    W2-->>C: success
+    Note over C: Pipeline complete — all nodes finished
+```
+
+Pipeline phases can be followed by a barrier step to re-synchronize all nodes (e.g., `systemd start` only after every node has finished installing).
 
 ## Quick Start
 
