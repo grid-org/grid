@@ -1,0 +1,19 @@
+# GRID Controller configuration
+api:
+  host: 0.0.0.0
+  port: 8765
+
+nats:
+  server:
+    host: 0.0.0.0
+    port: 4222
+  jetstream:
+    store: /var/lib/grid/nats
+
+scheduler:
+  max_concurrent: 5
+  max_pending: 100
+
+controller:
+  heartbeat_interval: "15s"
+  stale_threshold: "60s"

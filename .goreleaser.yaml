@@ -1,0 +1,185 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: grid
+    binary: grid
+    main: ./cmd/controller
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
+
+  - id: gridw
+    binary: gridw
+    main: ./cmd/worker
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
+
+  - id: gridc
+    binary: gridc
+    main: ./cmd/client
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
+
+archives:
+  - id: grid-server
+    ids:
+      - grid
+      - gridw
+    formats:
+      - tar.gz
+    name_template: "grid-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+  - id: grid-client
+    ids:
+      - gridc
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "gridc_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+nfpms:
+  - id: grid-controller
+    package_name: grid
+    ids:
+      - grid
+    vendor: GRID
+    homepage: https://github.com/grid-org/grid
+    maintainer: GRID Maintainers
+    description: GRID Controller - distributed orchestration engine
+    license: MIT
+    formats:
+      - deb
+    dependencies:
+      - ca-certificates
+      - systemd
+    contents:
+      - src: packaging/grid.service
+        dst: /etc/systemd/system/grid.service
+      - src: packaging/grid.yaml
+        dst: /etc/grid/grid.yaml
+        type: config|noreplace
+    scripts:
+      postinstall: scripts/postinstall.sh
+      preremove: scripts/preremove.sh
+
+  - id: grid-worker
+    package_name: gridw
+    ids:
+      - gridw
+    vendor: GRID
+    homepage: https://github.com/grid-org/grid
+    maintainer: GRID Maintainers
+    description: GRID Worker - distributed task executor
+    license: MIT
+    formats:
+      - deb
+    dependencies:
+      - ca-certificates
+      - systemd
+    contents:
+      - src: packaging/gridw.service
+        dst: /etc/systemd/system/gridw.service
+      - src: packaging/gridw.yaml
+        dst: /etc/grid/gridw.yaml
+        type: config|noreplace
+    scripts:
+      postinstall: scripts/postinstall.sh
+      preremove: scripts/preremove.sh
+
+  - id: grid-client
+    package_name: gridc
+    ids:
+      - gridc
+    vendor: GRID
+    homepage: https://github.com/grid-org/grid
+    maintainer: GRID Maintainers
+    description: GRID CLI client
+    license: MIT
+    formats:
+      - deb
+
+dockers_v2:
+  - id: grid
+    ids:
+      - grid
+    images:
+      - "ghcr.io/grid-org/grid"
+    tags:
+      - "v{{ .Version }}"
+      - latest
+    dockerfile: Dockerfile.goreleaser
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      "org.opencontainers.image.title": "grid"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.source": "https://github.com/grid-org/grid"
+    extra_files:
+      - web
+
+  - id: gridw
+    ids:
+      - gridw
+    images:
+      - "ghcr.io/grid-org/gridw"
+    tags:
+      - "v{{ .Version }}"
+      - latest
+    dockerfile: Dockerfile.gridw.goreleaser
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      "org.opencontainers.image.title": "gridw"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.source": "https://github.com/grid-org/grid"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+release:
+  github:
+    owner: grid-org
+    name: grid
+  draft: false
+  prerelease: auto
