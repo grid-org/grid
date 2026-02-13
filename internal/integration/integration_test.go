@@ -513,3 +513,47 @@ func TestE2E_JobList(t *testing.T) {
 		t.Errorf("jobs len = %d, want 3", len(jobs))
 	}
 }
+
+func TestE2E_Pipeline(t *testing.T) {
+	tc := setupCluster(t)
+
+	startTestWorker(t, tc.env, "w1", []string{"web"})
+	startTestWorker(t, tc.env, "w2", []string{"web"})
+	time.Sleep(200 * time.Millisecond)
+
+	// Submit a mixed job: barrier → pipeline → barrier
+	job := tc.postJob(t, `{
+		"target": {"scope": "all"},
+		"tasks": [
+			{"backend": "test", "action": "succeed", "params": {"message": "barrier-1"}},
+			{"tasks": [
+				{"backend": "test", "action": "succeed", "params": {"message": "pipe-step-1"}},
+				{"backend": "ping", "action": "echo", "params": {"message": "pipe-step-2"}}
+			]},
+			{"backend": "test", "action": "succeed", "params": {"message": "barrier-2"}}
+		]
+	}`)
+
+	testutil.WaitFor(t, 15*time.Second, func() bool {
+		j := tc.getJob(t, job.ID)
+		return j.Status == models.JobCompleted
+	}, "pipeline E2E job should complete")
+
+	got := tc.getJob(t, job.ID)
+	if got.Status != models.JobCompleted {
+		t.Errorf("Status = %q, want completed", got.Status)
+	}
+
+	// 4 leaf steps: barrier(0) + pipeline(1,2) + barrier(3)
+	if len(got.Results) != 4 {
+		t.Errorf("Results has %d steps, want 4", len(got.Results))
+	}
+
+	// Each step should have 2 node results
+	for step := 0; step < 4; step++ {
+		key := fmt.Sprintf("%d", step)
+		if len(got.Results[key]) != 2 {
+			t.Errorf("step %d has %d nodes, want 2", step, len(got.Results[key]))
+		}
+	}
+}

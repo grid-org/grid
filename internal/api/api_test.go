@@ -91,7 +91,7 @@ func TestGetJob_Found(t *testing.T) {
 	job := models.Job{
 		ID:     "get-test",
 		Target: models.Target{Scope: "all"},
-		Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+		Tasks:  []models.Phase{{Backend: "test", Action: "succeed"}},
 		Status: models.JobRunning,
 	}
 	env.Client.CreateJob(job)
@@ -132,7 +132,7 @@ func TestListJobs(t *testing.T) {
 		env.Client.CreateJob(models.Job{
 			ID:     id,
 			Target: models.Target{Scope: "all"},
-			Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+			Tasks:  []models.Phase{{Backend: "test", Action: "succeed"}},
 		})
 	}
 
@@ -160,7 +160,7 @@ func TestCancelJob_Pending(t *testing.T) {
 	job := models.Job{
 		ID:     "cancel-api",
 		Target: models.Target{Scope: "all"},
-		Tasks:  []models.Task{{Backend: "test", Action: "succeed"}},
+		Tasks:  []models.Phase{{Backend: "test", Action: "succeed"}},
 	}
 	sched.Enqueue(job)
 

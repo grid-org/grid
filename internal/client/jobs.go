@@ -102,9 +102,37 @@ func (c *Client) PublishCommand(jobID string, taskIndex int, target models.Targe
 	return nil
 }
 
+// PublishCommandToNode publishes a task command to a specific node (for pipeline dispatch).
+func (c *Client) PublishCommandToNode(jobID string, taskIndex int, nodeID string, task models.Task) error {
+	subject := fmt.Sprintf("cmd.node.%s.%s.%s", nodeID, task.Backend, task.Action)
+
+	params, err := json.Marshal(task.Params)
+	if err != nil {
+		return fmt.Errorf("encoding params: %w", err)
+	}
+
+	msg := &nats.Msg{
+		Subject: subject,
+		Header: nats.Header{
+			"job-id":     []string{jobID},
+			"task-index": []string{fmt.Sprintf("%d", taskIndex)},
+			"backend":    []string{task.Backend},
+			"action":     []string{task.Action},
+		},
+		Data: params,
+	}
+
+	if _, err := c.Publish(msg); err != nil {
+		return fmt.Errorf("publishing command to node: %w", err)
+	}
+
+	log.Debug("Command published to node", "subject", subject, "job", jobID, "task", taskIndex, "node", nodeID)
+	return nil
+}
+
 // PublishResult publishes a task result to the results stream.
 func (c *Client) PublishResult(result models.TaskResult) error {
-	subject := fmt.Sprintf("result.%s.%s", result.JobID, result.NodeID)
+	subject := fmt.Sprintf("result.%s.%d.%s", result.JobID, result.TaskIndex, result.NodeID)
 
 	data, err := json.Marshal(result)
 	if err != nil {
