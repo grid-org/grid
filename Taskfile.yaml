@@ -49,26 +49,7 @@ tasks:
     cmds:
     - rm -f bin/*
 
-  package:
-    desc: "Build .deb package from binaries"
-    deps: [default]
+  release:snapshot:
+    desc: "Build a local release snapshot (no publish)"
     cmds:
-      # Create the Debian control directory.
-      - mkdir -p pkg/DEBIAN
-      # Write a minimal control file (customize package info as needed).
-      - |
-        cat <<EOF > pkg/DEBIAN/control
-        Package: grid
-        Version: 0.1.0
-        Section: base
-        Priority: optional
-        Architecture: amd64
-        Maintainer: Eve <eve@lambdal.com>
-        Description: Grid Remote Infrastructure Director
-        EOF
-      # Create the directory for binaries (adjust the destination if desired).
-      - mkdir -p pkg/usr/local/bin
-      # Copy the built binaries into the package structure.
-      - cp bin/grid bin/gridw bin/gridc pkg/usr/local/bin/
-      # Build the .deb package (the output package name can be adjusted).
-      - dpkg-deb --build pkg grid_1.0.0_amd64.deb
+      - goreleaser release --snapshot --clean

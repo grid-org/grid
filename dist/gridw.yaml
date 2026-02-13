@@ -1,0 +1,10 @@
+# GRID Worker configuration
+worker:
+  groups: []
+  heartbeat_interval: "30s"
+  inactive_threshold: "10m"
+
+nats:
+  client:
+    urls:
+      - nats://localhost:4222
