@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # Controller image
 FROM base AS controller
 COPY --from=build-controller /workspace/bin/controller /app/controller
+COPY --from=builder /workspace/web /app/web
 ENTRYPOINT ["/app/controller"]
 
 # Worker image
