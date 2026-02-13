@@ -54,7 +54,7 @@ func startTestWorker(t *testing.T, env *testutil.TestEnv, nodeID string, groups 
 
 	w := &testWorker{
 		client:   c,
-		backends: backends.New(),
+		backends: backends.New(nil),
 		nodeID:   nodeID,
 		groups:   groups,
 	}

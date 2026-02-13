@@ -32,7 +32,7 @@ type Worker struct {
 func New(cfg *config.Config) *Worker {
 	return &Worker{
 		config:   cfg,
-		backends: backends.New(),
+		backends: backends.New(cfg.Worker.AllowedPaths),
 		nodeID:   cfg.NATS.Name,
 	}
 }
