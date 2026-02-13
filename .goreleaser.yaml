@@ -49,10 +49,16 @@ builds:
       - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
 
 archives:
-  - id: grid-archive
+  - id: grid-server
     ids:
       - grid
       - gridw
+    formats:
+      - tar.gz
+    name_template: "grid-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+  - id: grid-client
+    ids:
       - gridc
     formats:
       - tar.gz
@@ -60,7 +66,7 @@ archives:
       - goos: windows
         formats:
           - zip
-    name_template: "grid_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: "gridc_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: "checksums.txt"
@@ -81,9 +87,9 @@ nfpms:
       - ca-certificates
       - systemd
     contents:
-      - src: dist/grid.service
+      - src: packaging/grid.service
         dst: /etc/systemd/system/grid.service
-      - src: dist/grid.yaml
+      - src: packaging/grid.yaml
         dst: /etc/grid/grid.yaml
         type: config|noreplace
     scripts:
@@ -105,9 +111,9 @@ nfpms:
       - ca-certificates
       - systemd
     contents:
-      - src: dist/gridw.service
+      - src: packaging/gridw.service
         dst: /etc/systemd/system/gridw.service
-      - src: dist/gridw.yaml
+      - src: packaging/gridw.yaml
         dst: /etc/grid/gridw.yaml
         type: config|noreplace
     scripts:
